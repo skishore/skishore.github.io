@@ -1,12 +1,77 @@
 <head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <script type="text/javascript">
     var host = 'skishore.me';
     if (window.location.host === host &&
-        window.location.protocol != 'https:') {
+        window.location.protocol !== 'https:') {
       window.location.protocol = 'https';
     }
   </script>
+  <style type="text/css">
+    body {
+      color: #444;
+      font-size: 18px;
+      line-height: 1.6;
+      margin: 48px auto;
+      max-width: 640px;
+      padding: 0 12px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.2;
+    }
+
+    li {
+      margin: 12px 0;
+    }
+  </style>
 </head>
 <body>
-  Under construction...
+  <h3>About me</h3>
+  <p>
+    I'm Shaunak. I live in Cambridge, MA and work at $BIGCO.
+  </p>
+  <h3>Upcoming</h3>
+  <ul>
+    <li>
+      I estimated whether voting is worth it for a rational, altruistic person.
+      Conclusion: it probably is, at least in swing states -
+      I'll write up my analysis soon.
+    </li>
+    <li>
+      I've been working on a video game based on the idea that NLP can be
+      done with clever metapramming instead of with ML. The claim seems false.
+    </li>
+  </ul>
+  <h3>Projects</h3>
+  <ul>
+    <li>
+      <a href="https://combinos.herokuapp.com">Combinos</a>
+      (<a href="https://github.com/skishore/ugli/tree/combinos">source</a>):
+      A Tetris variant in which the average piece size increases as you play.
+      In the battle mode, clearing lines sends opponents bigger pieces.
+    </li>
+    <li>
+      <a href="https://www.skishore.me/inkstone">Inkstone</a>
+      (<a href="https://github.com/skishore/inkstone">source</a>):
+      Cross-platform Chinese writing app.
+      Features handwriting recognition, spaced-repetition, and offline support.
+    </li>
+    <li>
+      <a href="https://www.skishore.me/makemeahanzi">Make Me a Hanzi</a>
+      (<a href="https://github.com/skishore/makemeahanzi">source</a>):
+      Open-source Chinese character stroke order dataset. Uses heuristics and
+      machine-learning to extract data from a font.
+    </li>
+    <li>
+      <a href="https://www.dropbox.com/s/w2cfxg1f4rx6kz1/puzzle.pdf?dl=1">Matchmaking</a>:
+      A variety cryptic I wrote, in the style of The Atlantic's puzzles,
+      about making good pairings. (Note: the deceptive byline is intentional.)
+    </li>
+  </ul>
+  <h3>Contact</h3>
+  <p>
+    You can email me at kshaunak [at] gmail [dot] com.
+  </p>
 </body>
