@@ -1,0 +1,204 @@
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script type="text/javascript">
+    var host = 'skishore.me';
+    if (window.location.host === host &&
+        window.location.protocol !== 'https:') {
+      window.location.protocol = 'https';
+    }
+  </script>
+  <style type="text/css">
+    body {
+      color: #444;
+      font-size: 18px;
+      line-height: 1.6;
+      margin: 48px auto;
+      max-width: 640px;
+      padding: 0 12px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.2;
+    }
+
+    li {
+      margin: 12px 0;
+    }
+  </style>
+</head>
+<body>
+  <h3>Voting matters, in theory</h3>
+  <p>
+    People vote for a variety of reasons: as a civic duty, as a social signal,
+    as support for an ideology, etc.
+    But the most fundamental reason to vote is to win elections.
+  </p>
+  <p>
+    In 2016, my brother told me that voting
+    (in the perennial swing state of Pennsylvania)
+    wasn't worth his time because one vote was so unlikely to change the
+    election outcome.
+
+    I don't think this argument holds water for even mildly altrustic people.
+    <a href="https://80000hours.org/2016/11/why-the-hour-you-spend-voting-is-the-most-socially-impactful-of-all/">
+      80,000 Hours analyzed of the efficacy of one vote</a>,
+    drawing on empirical studies that claim that voting in a swing state
+    has around a 1 in 10 million chance of swinging a US presidential election.
+    The problem is that the arguments in these studies can be hard to parse
+    and easy to ignore for reluctant voters like my brother.
+  </p>
+  <p>
+    I want to present a simple theoretical analysis that shows that voting
+    matters a great deal in swing states. The crux of the analysis is this
+    asymptotic claim:
+  </p>
+  <i>
+    <b>Claim:</b> In a two-party election with n voters where the polling
+    variance σ<sup>2</sup> is constant and the polling mean is 50% + kσ,
+    the probability that one vote changes the outcome is
+    θ(e<sup>-k<sup>2</sup>/2</sup>/k &middot; 1/n).
+    In particular, if k is constant, the probability is θ(1/n).
+  </i>
+  <p>
+    In the rest of this analysis, I consider the consequences of this claim,
+    lay out my assumptions and prove the claim, and then discuss how valid
+    those assumptions are.
+  </p>
+  <h3>Consequences</h3>
+  <p>
+    The outcome of an election affects the entire governed population.
+    In general, this population is a superset of voters.
+    In the US, most of the population are not voters:
+    children, felons, and non-citizens cannot vote,
+    and most eligible adults choose not to.
+  </p>
+    To get a lower bound for election impacts, we can consider laws like the
+    Affordable Care Act and the 2017 tax cuts, neither of which would have
+    passed if the the opposition held power.
+    These laws reallocated hundreds of billions of dollars each and affected
+    most of the country.
+    They show that an election effect size of order θ(<i>n</i>) is plausible.
+    Combined with our claim above, we see that the social impact of voting is
+    independent of population size - if <i>k</i> is constant,
+    θ(<i>n</i>/<i>n</i>) = θ(1) - and is boosted by low turnout.
+  </p>
+  <p>
+    The exponential dependence on <i>k</i> explains the colloquial distinction
+    between "swing states" and other states.
+    Even when federal races are uncompetitive, though, the ballot may
+    include state or local races for which a vote has high social impact.
+  </p>
+  <h3>Proof</h3>
+  <p>
+    Model the electorate as <i>n</i> independent, identically distributed
+    Bernoulli random variables that vote one way with probability <i>p</i>.
+    Assume that the polling yields a normally-distributed posterior for
+    <i>p</i>, with mean 0.5 + <i>kσ</i> and variance <i>σ</i><sup>2</sup>.
+    (Both these assumptions are clearly wrong; see below.)
+  </p>
+  <p>
+    If <i>p</i> is exactly 0.5, then the probability that a vote changes the outcome -
+    that is, the probability of an even split between the two parties -
+    is just (<i>n</i> C <i>n</i>/2)/2<sup><i>n</i></sup>.
+    By Stirling's approximation, this expression is θ(1/&Sqrt;<i>n</i>).
+  <p>
+    How large can <i>ε</i> get such that this asymptotic
+    bound still holds for <i>p</i> in [0.5 - <i>ε</i>, 0.5 + <i>ε</i>]?
+    The probability of an even split when <i>p</i> = 0.5 + <i>ε</i> is:
+  </p>
+  <table>
+    <tr><td> </td><td>(<i>n</i> C <i>n</i>/2) &middot; (0.5 + <i>ε</i>)<sup><i>n</i>/2</sup>(0.5 - <i>ε</i>)<sup><i>n</i>/2</sup></td></tr>
+    <tr><td>=</td><td>(<i>n</i> C <i>n</i>/2) &middot; (0.25 - <i>ε</i><sup>2</sup>)<sup><i>n</i>/2</sup></td></tr>
+    <tr><td>=</td><td>(<i>n</i> C <i>n</i>/2)/2<sup><i>n</i></sup> &middot; (1 - 4<i>ε</i><sup>2</sup>)<sup><i>n</i>/2</sup></td></tr>
+  </table>
+  <p>
+    As long as <i>ε</i> &le; 1/&Sqrt;<i>n</i>, the term on the right is θ(1)
+    and the whole expression is θ(1/&Sqrt;<i>n</i>). The probability that
+    <i>p</i> falls into this narrow range is roughly
+    <i>N</i>(0, <i>σ</i>)(<i>k</i>) &middot; 2/&Sqrt;<i>n</i>,
+    since for constant σ the probability density is roughly equal
+    over the entire interval.
+    Multiplying by θ(1/&Sqrt;<i>n</i>) and expanding the normal distribution's
+    density gives us our claim.
+  </p>
+  <h3>Validity</h3>
+  <p>
+    The proof above assumes that the electorate is composed of identical
+    voters who vote randomly on the day of the election.
+    In truth, voters make their decisions far in advance and different
+    segments of the electorate behave very differently.
+    Most randomness in the election result comes from whether or not different
+    voters turn out to vote.
+  </p>
+  <p>
+    The reason that these assumptions are teneble is because the result still
+    holds as long as the aggregate random variable of "the number of votes for
+    one side" behaves like a sum of <i>n</i> Bernoulli variables.
+    By the Central Limit Theorem, this sum is asymptotically normally
+    distributed with mean <i>np</i> and variance <i>np</i>(1-<i>p</i>).
+  </p>
+  <p>
+    Thus, weaker assumptions that are sufficient for the claim are:
+  </p>
+  <ol>
+    <li>The overall vote count for each side is normally distributed.</li>
+    <li>The variance of this vote count is of order θ(<i>np</i>(1-<i>p</i>)) ~ θ(<i>n</i>).</li>
+    <li>Polling gives us normally distributed estimate of <i>p</i> with variance <i>σ</i><sup>2</sup>.
+  </ol>
+  <p>
+    The first two assumptions hold in the aggregate regardless of the random structure
+    on the individual scale, as long as that randomness is independent and
+    there are enough people in each statistical segment.
+    Decomposing this sum as a sum of Bernoulli variables is just a convenient
+    way to analyze its behavior.
+  </p>
+  <p>
+    What about the third assumption?
+    In the US, most pollsters have an empirically-detectable left- or right-leaning bias.
+    Different polling methodologies also introduce bias, like using landlines
+    (more likely to include older voters) or polling all registered voters instead of likely voters
+    (more likely to include younger voters).
+    When we talk about the polling mean and polling variance, then,
+    we're talking about a statistical model that weights polls and corrects
+    for these effects, such as the ones by <a href="https://fivethirtyeight.com">FiveThirtyEight</a>.
+  </p>
+  <p>
+    Even using these models on well-studied elections with a lot of polling data,
+    our estimate of <i>p</i> has error bars on the order of &pm;2-4%, justifying "constant variance".
+  </p>
+  <p>
+    Finally, we should consider whether the asymptotic analysis above loses
+    too many constant factors to be of practical use.
+    The easiest way to do that is to note where we gain and lose these factors
+    and their rough order of magnitude:
+  </p>
+  <ul>
+    <li>There's a factor of 1/&Sqrt;(2<i>&pi;</i>) from Stirling's approximation: <b>-0.5 magnitudes</b>.</li>
+    <li>There's a factor of 1/<i>e</i><sup>2</sup> from substituting for <i>&epsilon;</i> in the term above: <b>-1 magnitude</b>.</li>
+    <li>There's a factor of 1/&Sqrt;(2<i>&pi;&sigma;<sup>2</sup></i>) in the density function. If &sigma; ~ 2-4%: <b>+1 magnitude</b>.</li>
+    <li>High turnout is still just a third of the governed population: <b>+0.5 magnitudes</b>.</li>
+  </ul>
+  <p>
+    These corrections roughly cancel out.
+    I think 1/<i>n</i> is a good estimate for the chance that a single vote
+    changes the outcome of a race with a polling mean around 48-52% and an
+    error bars around 2-4%.
+  </p>
+  <h3>Summary</h3>
+  <p>
+    This analysis suggests for an altrustic voter (that is, a voter who cares
+    about outcomes for everyone in their city, state, and country), voting is
+    roughly equally effective at all levels of government.
+    Since elections cause the reallocation of thousands of dollars per voter,
+    a 1/<i>n</i> chance of changing the outcome implies high social impact.
+    That's similar to the results of the 80,000 Hours post, even though we
+    arrived at them in a different way.
+  </p>
+  <p>
+    If you live in a swing state, vote!
+    If any other races on your ballot are competitive, vote!
+    And even if the winners are all but decided, vote -
+    it's good to develop the habit.
+  </p>
+</body>
