@@ -54,12 +54,21 @@
     asymptotic claim:
   </p>
   <i>
-    <b>Claim:</b> In a two-party election with n voters where the polling
-    variance σ<sup>2</sup> is constant and the polling mean is 50% + kσ,
-    the probability that one vote changes the outcome is
-    θ(e<sup>-k<sup>2</sup>/2</sup>/k &middot; 1/n).
-    In particular, if k is constant, the probability is θ(1/n).
+    <b>Claim:</b> In a two-party election with n voters
+    with polling mean &mu; and polling variance &sigma;<sup>2</sup>,
+    if we set k = |0.5 - &mu;|/&sigma;,
+    then the probability that one vote is decisive is
+    θ(e<sup>-k<sup>2</sup>/2</sup>/(&sigma;n)).
+    In particular, if &sigma; and k are constant, the probability is θ(1/n).
   </i>
+  <p>
+    This claim is not new; see
+    <a href="https://www.jstor.org/stable/30022981">
+      Margolis (1977): <i>The Probability of a Tie Election</i></a>
+    for a derivation including constant factors.
+    But I think that presenting a simple approach to prove this result
+    is valuable for both illustrative and rhetorical purposes.
+  </p>
   <p>
     In the rest of this analysis, I consider the consequences of this claim,
     lay out my assumptions and prove the claim, and then discuss how valid
@@ -91,16 +100,31 @@
   </p>
   <h3>Proof</h3>
   <p>
-    Model the electorate as <i>n</i> independent, identically distributed
-    Bernoulli random variables that vote one way with probability <i>p</i>.
-    Assume that the polling yields a normally-distributed posterior for
-    <i>p</i>, with mean 0.5 + <i>kσ</i> and variance <i>σ</i><sup>2</sup>.
-    (Both these assumptions are clearly wrong; see below.)
+    Assume the following heirarchical model the results of the election:
+  </p>
+  <ol>
+    <li>Draw a probability <i>p</i> from a normal distribution with mean <i>&mu;</i> and variance <i>&sigma;</i><sup>2</sup>.</li>
+    <li>Draw a vote count for one party from a normal distribution with mean <i>np</i> and variance &theta;(<i>n</i>). They win if this count exceeds <i>n</i>/2.</li>
+  </ol>
+  <p>
+    The key idea of our proof is to find an interval [0.5 - <i>ε</i>, 0.5 + <i>ε</i>]
+    such that if <i>p</i> falls into this interval, then there is a substantial chance of an evenly-split vote.
   </p>
   <p>
-    If <i>p</i> is exactly 0.5, then the probability that a vote changes the outcome -
-    that is, the probability of an even split between the two parties -
-    is just (<i>n</i> C <i>n</i>/2)/2<sup><i>n</i></sup>.
+    We can analyze the vote count from step 2 by modeling it as a sum of
+    <i>n</i> independent, identically distributed Bernoulli random variables
+    of mean <i>p</i>.
+    Their sum has mean <i>np</i> and variance <i>np</i>(1-<i>p</i>),
+    which is &theta;(<i>n</i>) for <i>p</i> in our interval.
+    We may have to scale this sum around <i>np</i>
+    to match the variance from our original model,
+    but doing so only changes <i>&epsilon;</i> by a constant factor.
+    From now on, we assume this Bernoulli decomposition.
+  </p>
+  <p>
+    If <i>p</i> is exactly 0.5, then the probability that a vote is decisive -
+    that is, the probability of an even split -
+    is (<i>n</i> C <i>n</i>/2)/2<sup><i>n</i></sup>.
     By Stirling's approximation, this expression is θ(1/&Sqrt;<i>n</i>).
   <p>
     How large can <i>ε</i> get such that this asymptotic
@@ -124,48 +148,55 @@
   </p>
   <h3>Validity</h3>
   <p>
-    The proof above assumes that the electorate is composed of identical
-    voters who vote randomly on the day of the election.
-    In truth, voters make their decisions far in advance and different
-    segments of the electorate behave very differently.
-    Most randomness in the election result comes from whether or not different
-    voters turn out to vote.
-  </p>
-  <p>
-    The reason that these assumptions are teneble is because the result still
-    holds as long as the aggregate random variable of "the number of votes for
-    one side" behaves like a sum of <i>n</i> Bernoulli variables.
-    By the Central Limit Theorem, this sum is asymptotically normally
-    distributed with mean <i>np</i> and variance <i>np</i>(1-<i>p</i>).
-  </p>
-  <p>
-    Thus, weaker assumptions that are sufficient for the claim are:
+    Assigning a probability to an election outcome is really about defining
+    where our uncertainty about the event comes from.
+    The two-stage heirarchical model from the proof above accounts for two
+    kinds of uncertainty that we should have:
   </p>
   <ol>
-    <li>The overall vote count for each side is normally distributed.</li>
-    <li>The variance of this vote count is of order θ(<i>np</i>(1-<i>p</i>)) ~ θ(<i>n</i>).</li>
-    <li>Polling gives us normally distributed estimate of <i>p</i> with variance <i>σ</i><sup>2</sup>.
+    <li>The first stage reflects our uncertainty about the electorate's aggregate behavior.</li>
+    <li>The second stage says that even if we understand this aggregate behavior, we should still be unsure about the election-day behavior of individual voters.</li>
   </ol>
   <p>
-    The first two assumptions hold in the aggregate regardless of the random structure
-    on the individual scale, as long as that randomness is independent and
-    there are enough people in each statistical segment.
-    Decomposing this sum as a sum of Bernoulli variables is just a convenient
-    way to analyze its behavior.
+    Polling provides us critical data about the electorate in aggregate,
+    but even carefully-constructed polls with good sample sizes have error
+    bars on the order of &pm;2-4%.
   </p>
   <p>
-    What about the third assumption?
+    We might try to reduce polling uncertainty by taking an average across polls.
+    Doing so is not trivial.
     In the US, most pollsters have an empirically-detectable left- or right-leaning bias.
     Different polling methodologies also introduce bias, like using landlines
     (more likely to include older voters) or polling all registered voters instead of likely voters
     (more likely to include younger voters).
+  </p>
+  <p>
     When we talk about the polling mean and polling variance, then,
     we're talking about a statistical model that weights polls and corrects
     for these effects, such as the ones by <a href="https://fivethirtyeight.com">FiveThirtyEight</a>.
+    And even these models have uncertainty on the order of &pm;2-4%,
+    justifying the first type of uncertainty.
   </p>
   <p>
-    Even using these models on well-studied elections with a lot of polling data,
-    our estimate of <i>p</i> has error bars on the order of &pm;2-4%, justifying "constant variance".
+    Where does the second type of uncertainty come from?
+    The proof above considers an electorate composed of identical voters
+    who each vote randomly on the day of the election.
+    In truth, most voters make their decisions far in advance and different
+    segments of the electorate behave very differently.
+    However, there are many independent sources of voter-level randomness that
+    can affect an election result:
+  </p>
+  <ul>
+    <li>Some voters may be undecided about their vote, deciding based on recent news.</li>
+    <li>Some voters may choose not to vote, deciding based on time or convenience.</li>
+    <li>Some voters may be unable to vote, due to a busy schedule at work, a lack of transportation, or various procedural measures to discourage turnout.</li>
+  </ul>
+  <p>
+    Even if we have a highly structured understanding of the electorate -
+    for example, a breakdown into (say) 45% Republicans, 45% Democrats, and 10% swing voters -
+    these groups will still be of size &theta;(<i>n</i>) each,
+    and the overall vote counts from each group will be normally distributed
+    with variance &theta;(<i>n</i>), justifying the second type of uncertainty.
   </p>
   <p>
     Finally, we should consider whether the asymptotic analysis above loses
@@ -181,9 +212,14 @@
   </ul>
   <p>
     These corrections roughly cancel out.
-    I think 1/<i>n</i> is a good estimate for the chance that a single vote
-    changes the outcome of a race with a polling mean around 48-52% and an
-    error bars around 2-4%.
+    Thus, 1/<i>n</i> is a good estimate for the chance that a single vote
+    changes the outcome of a race with a polling mean around 46-54% and
+    polling standard deviation around 2-4%.
+    According to the result from Margolis's paper,
+    that's actually a slight underestimate of the probability,
+    but at that point other corrections
+    (like accounting for the structure of the electorate)
+    start to matter as well.
   </p>
   <h3>Summary</h3>
   <p>
