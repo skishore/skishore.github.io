@@ -43,8 +43,9 @@
     I don't think this argument holds water for even mildly altrustic people.
     <a href="https://80000hours.org/2016/11/why-the-hour-you-spend-voting-is-the-most-socially-impactful-of-all/">
       80,000 Hours analyzed of the efficacy of one vote</a>,
-    drawing on empirical studies that claim that voting in a swing state
-    has around a 1 in 10 million chance of swinging a US presidential election.
+    drawing on empirical studies that claim that a voter in a swing state
+    has around a 1 in 10 million chance of casting the sole deciding vote
+    in a US presidential election.
     The problem is that the arguments in these studies can be hard to parse
     and easy to ignore for reluctant voters like my brother.
   </p>
@@ -70,18 +71,23 @@
     is valuable for both illustrative and rhetorical purposes.
   </p>
   <p>
-    In the rest of this analysis, I consider the consequences of this claim,
+    In the rest of this analysis, I motivate our interest this claim,
     lay out my assumptions and prove the claim, and then discuss how valid
     those assumptions are.
   </p>
-  <h3>Consequences</h3>
+  <h3>Motivation</h3>
   <p>
     The outcome of an election affects the entire governed population.
     In general, this population is a superset of voters.
     In the US, most of the population are not voters:
     children, felons, and non-citizens cannot vote,
     and most eligible adults choose not to.
+    Turnouts are around
+    <a href="https://en.wikipedia.org/wiki/Voter_turnout_in_the_United_States_presidential_elections">55% for presidential elections</a>
+    and around
+    <a href="https://en.wikipedia.org/wiki/Voter_turnout#International_differences">48% for midterms</a>.
   </p>
+  <p>
     To get a lower bound for election impacts, we can consider laws like the
     Affordable Care Act and the 2017 tax cuts, neither of which would have
     passed if the the opposition held power.
@@ -93,10 +99,13 @@
     θ(<i>n</i>/<i>n</i>) = θ(1) - and is boosted by low turnout.
   </p>
   <p>
-    The exponential dependence on <i>k</i> explains the colloquial distinction
-    between "swing states" and other states.
+    The claimed exponential dependence on <i>k</i> explains the colloquial
+    distinction between "swing states" and other states.
     Even when federal races are uncompetitive, though, the ballot may
     include state or local races for which a vote has high social impact.
+    As for primaries, when one party is dominant, impacts can still be high
+    if its candidates have sufficiently different positions, but in closer
+    races, ther chances of winning are critical.
   </p>
   <h3>Proof</h3>
   <p>
@@ -158,9 +167,18 @@
     <li>The second stage says that even if we understand this aggregate behavior, we should still be unsure about the election-day behavior of individual voters.</li>
   </ol>
   <p>
+    The specific distribution in the first stage matters little;
+    we only need it to maintain a relatively high density
+    over the interval [0.5 - <i>ε</i>, 0.5 + <i>ε</i>].
+    We should justify the normal-distribution assumption and the
+    order-of-magnitude variance in the second stage.
+  </p>
+  <p>
     Polling provides us critical data about the electorate in aggregate,
     but even carefully-constructed polls with good sample sizes have error
-    bars on the order of &pm;2-4%.
+    bars around &pm;2-4%.
+    These error bars are with respect to the population being sampled,
+    not the election result.
   </p>
   <p>
     We might try to reduce polling uncertainty by taking an average across polls.
@@ -174,8 +192,8 @@
     When we talk about the polling mean and polling variance, then,
     we're talking about a statistical model that weights polls and corrects
     for these effects, such as the ones by <a href="https://fivethirtyeight.com">FiveThirtyEight</a>.
-    And even these models have uncertainty on the order of &pm;2-4%,
-    justifying the first type of uncertainty.
+    And even these models have uncertainty around &pm;2-4% with respect to
+    the election result, justifying the first type of uncertainty.
   </p>
   <p>
     Where does the second type of uncertainty come from?
@@ -221,6 +239,14 @@
     (like accounting for the structure of the electorate)
     start to matter as well.
   </p>
+  <p>
+    From the 80,000 Hours post,
+    <a href="https://gking.harvard.edu/files/estimatprob.pdf">various</a>
+    <a href="http://www.stat.columbia.edu/~gelman/research/published/probdecisive2.pdf">empirical</a>
+    <a href="http://www.stat.columbia.edu/~gelman/research/published/elect_college_oxford.pdf">analyses</a> and
+    <a href="https://en.wikipedia.org/wiki/List_of_close_election_results">close historical elections</a>
+    provide further evidence that these constant factors are good.
+  </p>
   <h3>Summary</h3>
   <p>
     This analysis suggests for an altrustic voter (that is, a voter who cares
@@ -228,13 +254,14 @@
     roughly equally effective at all levels of government.
     Since elections cause the reallocation of thousands of dollars per voter,
     a 1/<i>n</i> chance of changing the outcome implies high social impact.
-    That's similar to the results of the 80,000 Hours post, even though we
-    arrived at them in a different way.
+    That's similar to the result of the 80,000 Hours post, even though we
+    arrived at it in a different way.
   </p>
   <p>
     If you live in a swing state, vote!
     If any other races on your ballot are competitive, vote!
     And even if the winners are all but decided, vote -
-    it's good to develop the habit.
+    it's good to develop a habit,
+    if only to prepare for elections where the impact of voting is high.
   </p>
 </body>
