@@ -1,0 +1,30 @@
+Standing on the gray brick steps, you survey the scene:
+
+- A man points at himself.
+- A man struggles to open a jar.
+- A man takes a loaf of bread out of an oven.
+- A man trips, and then his pants fall off.
+- Someone collects eyeballs.
+- The pearly gates open?
+
+NOTE: All moves are to the right.
+
+- Move a Y (18x)
+- Move a letter in the top row (2x)
+- Move a letter next to an I (18x)
+- Move a consonant that ends a word (15x)
+- Move a letter in a column by itself (15x)
+- Move a letter on top of a G (14x)
+- Move a vowel on top of a column (17x)
+- Move a letter E (13x)
+- Move a letter in the same column as a K (13x)
+- Move a consonant next to an N (10x)
+- Move a letter under three others (10x)
+- Move a letter next to a vowel (9x)
+- Move a letter that ends a word (9x)
+- Move a letter on top of two others (8x)
+- Move a letter on top of a C (3x)
+- Move a letter next to itself (4x)
+- Move a letter on top of two others (5x)
+- Move a vowel (9x)
+- Move a letter next to a B (8x)
