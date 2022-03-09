@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<title>voxels</title>
+<meta charset="UTF-8">
+<html>
+  <head>
+    <script type="text/javascript" src="lib/babylon.js"></script>
+
+    <script type="text/javascript" src="lib/ndarray.js"></script>
+    <script type="text/javascript" src="lib/noa-terrain-mesher.js"></script>
+
+    <script type="module" src="target/sweep.js"></script>
+    <script type="module" src="target/main.js"></script>
+
+    <style type="text/css">
+      body {
+        margin: none;
+        overflow: hidden;
+      }
+
+      #container, #container>canvas {
+        overflow: hidden;
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        top: 0;
+        height: 100%;
+        width: 100%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="container">
+      <canvas></canvas>
+    </div>
+  </body>
+</html>
