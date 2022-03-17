@@ -105,7 +105,6 @@ class Tensor3 {
 //////////////////////////////////////////////////////////////////////////////
 // The game engine:
 const Constants = {
-    CHUNK_SIZE: 128,
     CHUNK_KEY_BITS: 8,
     TICK_RESOLUTION: 4,
     TICKS_PER_FRAME: 4,
@@ -170,14 +169,17 @@ class Container {
 const kBlack = [0, 0, 0];
 const kWhite = [1, 1, 1];
 const kNoMaterial = 0;
+const kEmptyBlock = 0;
+const kUnknownBlock = 1;
 class Registry {
     constructor() {
-        this._opaque = [false];
-        this._solid = [false];
-        this._meshes = [null];
+        this._opaque = [false, false];
+        this._solid = [false, true];
+        this._meshes = [null, null];
         this._faces = [];
-        for (let i = 0; i < 6; i++)
+        for (let i = 0; i < 12; i++) {
             this._faces.push(kNoMaterial);
+        }
         this._materials = [];
         this._ids = new Map();
     }
@@ -252,8 +254,25 @@ class Camera {
         this.heading = 0;
         this.zoom = 0;
         this.direction = Vec3.create();
+        this.last_dx = 0;
+        this.last_dy = 0;
     }
     applyInputs(dx, dy, dscroll) {
+        // Smooth out large mouse-move inputs.
+        const jerkx = Math.abs(dx) > 400 && Math.abs(dx / (this.last_dx || 1)) > 4;
+        const jerky = Math.abs(dy) > 400 && Math.abs(dy / (this.last_dy || 1)) > 4;
+        if (jerkx || jerky) {
+            const saved_x = this.last_dx;
+            const saved_y = this.last_dy;
+            this.last_dx = (dx + this.last_dx) / 2;
+            this.last_dy = (dy + this.last_dy) / 2;
+            dx = saved_x;
+            dy = saved_y;
+        }
+        else {
+            this.last_dx = dx;
+            this.last_dy = dy;
+        }
         let pitch = this.holder.rotation.x;
         let heading = this.holder.rotation.y;
         // Overwatch uses the same constant values to do this conversion.
@@ -286,6 +305,7 @@ class Camera {
     }
 }
 ;
+//////////////////////////////////////////////////////////////////////////////
 class Renderer {
     constructor(container) {
         const antialias = true;
@@ -301,34 +321,7 @@ class Renderer {
         const scene = this.scene;
         scene.detachControl();
         scene.skipPointerMovePicking = true;
-        scene._addComponent(new BABYLON.OctreeSceneComponent(scene));
         this.camera = new Camera(scene);
-        this.octree = new BABYLON.Octree(() => { });
-        this.octree.blocks = [];
-        scene._selectionOctree = this.octree;
-        this.blocks = new Map();
-    }
-    addMesh(mesh, dynamic) {
-        if (dynamic) {
-            const meshes = this.octree.dynamicContent;
-            mesh.onDisposeObservable.add(() => drop(meshes, mesh));
-            meshes.push(mesh);
-            return;
-        }
-        const key = this.getMeshKey(mesh);
-        const block = this.getMeshBlock(mesh, key);
-        mesh.onDisposeObservable.add(() => {
-            drop(block.entries, mesh);
-            if (block.entries.length)
-                return;
-            drop(this.octree.blocks, block);
-            this.blocks.delete(key);
-        });
-        block.entries.push(mesh);
-        mesh.alwaysSelectAsActiveMesh = true;
-        mesh.doNotSyncBoundingInfo = true;
-        mesh.freezeWorldMatrix();
-        mesh.freezeNormals();
     }
     makeSprite(url) {
         const scene = this.scene;
@@ -343,6 +336,7 @@ class Renderer {
         material.backFaceCulling = false;
         material.diffuseTexture = texture;
         const mesh = BABYLON.Mesh.CreatePlane(`block-${url}`, 1, scene);
+        mesh.cullingStrategy = BABYLON.AbstractMesh.CULLINGSTRATEGY_STANDARD;
         mesh.material = material;
         return mesh;
     }
@@ -378,36 +372,10 @@ activeMeshesEvaluationTime: ${perf.activeMeshesEvaluationTimeCounter.average}
       `.trim());
         });
     }
-    getMeshKey(mesh) {
-        assert(!mesh.parent);
-        const pos = mesh.position;
-        const mod = Constants.CHUNK_SIZE;
-        assert(pos.x % mod === 0);
-        assert(pos.y % mod === 0);
-        assert(pos.z % mod === 0);
-        const bits = Constants.CHUNK_KEY_BITS;
-        const mask = (1 << bits) - 1;
-        return (((pos.x / mod) & mask) << (0 * bits)) |
-            (((pos.y / mod) & mask) << (1 * bits)) |
-            (((pos.z / mod) & mask) << (2 * bits));
-    }
-    getMeshBlock(mesh, key) {
-        const cached = this.blocks.get(key);
-        if (cached)
-            return cached;
-        const pos = mesh.position;
-        const mod = Constants.CHUNK_SIZE;
-        const min = new BABYLON.Vector3(pos.x, pos.y, pos.z);
-        const max = new BABYLON.Vector3(pos.x + mod, pos.y + mod, pos.z + mod);
-        const block = new BABYLON.OctreeBlock(min, max, 0, 0, 0, () => { });
-        this.octree.blocks.push(block);
-        this.blocks.set(key, block);
-        return block;
-    }
 }
 ;
 class TerrainMesher {
-    constructor(renderer, registry) {
+    constructor(registry, renderer) {
         this.flatMaterial = renderer.makeStandardMaterial('flat-material');
         this.registry = registry;
         this.requests = 0;
@@ -622,6 +590,9 @@ const kTmpTransform = new Float32Array([
     0, 0, 1, 0,
     0, 0, 0, 1,
 ]);
+const kSpriteKeyBits = 10;
+const kSpriteKeySize = 1 << kSpriteKeyBits;
+const kSpriteKeyMask = kSpriteKeySize - 1;
 class TerrainSprites {
     constructor(renderer) {
         this.renderer = renderer;
@@ -635,15 +606,18 @@ class TerrainSprites {
         if (!data) {
             const capacity = kMinCapacity;
             const buffer = new Float32Array(capacity * 16);
-            data = { dirty: false, mesh, buffer, capacity, size: 0 };
+            data = { dirty: false, mesh, buffer, index: new Map(), capacity, size: 0 };
             this.kinds.set(block, data);
             mesh.parent = this.root;
             mesh.position.setAll(0);
             mesh.alwaysSelectAsActiveMesh = true;
             mesh.doNotSyncBoundingInfo = true;
+            mesh.freezeWorldMatrix();
             mesh.thinInstanceSetBuffer('matrix', buffer);
-            this.renderer.addMesh(mesh, true);
         }
+        const key = this.key(x, y, z);
+        if (data.index.has(key))
+            return;
         if (data.size === data.capacity) {
             this.reallocate(data, data.capacity * 2);
         }
@@ -651,29 +625,28 @@ class TerrainSprites {
         kTmpTransform[13] = y;
         kTmpTransform[14] = z;
         this.copy(kTmpTransform, 0, data.buffer, data.size);
+        data.index.set(key, data.size);
         data.size++;
         data.dirty = true;
     }
     remove(x, y, z, block) {
         const data = this.kinds.get(block);
         if (!data)
-            throw new Error(`Unknown block ${block} at (${x}, ${y}, ${z})`);
+            return;
         const buffer = data.buffer;
-        const index = (() => {
-            for (let i = 0; i < data.size; i++) {
-                if (buffer[i * 16 + 12] !== x)
-                    continue;
-                if (buffer[i * 16 + 13] !== y)
-                    continue;
-                if (buffer[i * 16 + 14] !== z)
-                    continue;
-                return i;
-            }
-            throw new Error(`Missing block ${block} at (${x}, ${y}, ${z})`);
-        })();
+        const key = this.key(x, y, z);
+        const index = data.index.get(key);
+        if (index === undefined)
+            return;
         const last = data.size - 1;
-        if (index !== last)
+        if (index !== last) {
+            const b = 16 * last + 12;
+            const other = this.key(buffer[b + 0], buffer[b + 1], buffer[b + 2]);
+            assert(data.index.get(other) === last);
             this.copy(buffer, last, buffer, index);
+            data.index.set(other, index);
+        }
+        data.index.delete(key);
         data.size--;
         if (data.capacity > Math.max(kMinCapacity, 4 * data.size)) {
             this.reallocate(data, data.capacity / 2);
@@ -709,6 +682,11 @@ class TerrainSprites {
             dst[dstOff + i] = src[srcOff + i];
         }
     }
+    key(x, y, z) {
+        return (x & kSpriteKeyMask) << (0 * kSpriteKeyBits) |
+            (y & kSpriteKeyMask) << (1 * kSpriteKeyBits) |
+            (z & kSpriteKeyMask) << (2 * kSpriteKeyBits);
+    }
     reallocate(data, capacity) {
         data.capacity = capacity;
         const buffer = new Float32Array(capacity * 16);
@@ -719,26 +697,42 @@ class TerrainSprites {
     }
 }
 ;
-//////////////////////////////////////////////////////////////////////////////
-class Env {
-    constructor(id) {
-        this.container = new Container(id);
-        this.entities = new EntityComponentSystem();
-        this.registry = new Registry();
-        this.renderer = new Renderer(this.container);
-        this.sprites = new TerrainSprites(this.renderer);
-        this.mesher = new TerrainMesher(this.renderer, this.registry);
-        this.timing = new Timing(this.render.bind(this), this.update.bind(this));
-        const size = Constants.CHUNK_SIZE;
-        this.voxels = new Tensor3(size, size, size);
-        this._terrainDirty = true;
-        this._mesh = null;
+;
+const kChunkBits = 5;
+const kChunkSize = 1 << kChunkBits;
+const kChunkMask = kChunkSize - 1;
+const kChunkKeyBits = 8;
+const kChunkKeySize = 1 << kChunkKeyBits;
+const kChunkKeyMask = kChunkKeySize - 1;
+const kChunkRadiusX = 8;
+const kChunkRadiusY = 0;
+// These conditions ensure that we'll dispose of a sprite before allocating
+// a new sprite at a key that collides with the old one.
+assert((1 << kSpriteKeyBits) > (kChunkSize * (2 * kChunkRadiusX + 1)));
+assert((1 << kSpriteKeyBits) > (kChunkSize * (2 * kChunkRadiusY + 1)));
+class World {
+    constructor(registry, renderer) {
+        this.chunks = new Map();
+        this.mesher = new TerrainMesher(registry, renderer);
+        this.sprites = new TerrainSprites(renderer);
+        this.renderer = renderer;
+        this.registry = registry;
     }
     getBlock(x, y, z) {
-        return this.voxels.get(x, y, z);
+        const bits = kChunkBits;
+        const chunk = this.getChunk(x >> bits, y >> bits, z >> bits, false);
+        if (!chunk || !chunk.voxels)
+            return kUnknownBlock;
+        const mask = kChunkMask;
+        return chunk.voxels.get(x & mask, y & mask, z & mask);
     }
     setBlock(x, y, z, block) {
-        const old = this.voxels.get(x, y, z);
+        const bits = kChunkBits;
+        const chunk = this.getChunk(x >> bits, y >> bits, z >> bits, false);
+        if (!chunk || !chunk.voxels)
+            return;
+        const mask = kChunkMask;
+        const old = chunk.voxels.get(x & mask, y & mask, z & mask);
         if (old === block)
             return;
         const old_mesh = this.registry._meshes[old];
@@ -747,9 +741,118 @@ class Env {
             this.sprites.remove(x, y, z, old);
         if (new_mesh)
             this.sprites.add(x, y, z, block, new_mesh);
-        this.voxels.set(x, y, z, block);
-        this._terrainDirty || (this._terrainDirty = !(old_mesh || old === 0) ||
+        chunk.voxels.set(x & mask, y & mask, z & mask, block);
+        chunk.dirty || (chunk.dirty = !(old_mesh || old === 0) ||
             !(new_mesh || block === 0));
+    }
+    getChunk(cx, cy, cz, add) {
+        const key = (cx & kChunkKeyMask) << (0 * kChunkKeyBits) |
+            (cy & kChunkKeyMask) << (1 * kChunkKeyBits) |
+            (cz & kChunkKeyMask) << (2 * kChunkKeyBits);
+        const result = this.chunks.get(key);
+        if (result)
+            return result;
+        if (!add)
+            return null;
+        const chunk = { dirty: true, loaded: false, sprites: false, mesh: null, voxels: null, cx, cy, cz };
+        this.chunks.set(key, chunk);
+        return chunk;
+    }
+    recenter(x, y, z) {
+        const dx = (x >> kChunkBits);
+        const dy = (y >> kChunkBits);
+        const dz = (z >> kChunkBits);
+        const lo = (kChunkRadiusX * kChunkRadiusX + 1) * kChunkSize * kChunkSize;
+        const hi = (kChunkRadiusX * kChunkRadiusX + 9) * kChunkSize * kChunkSize;
+        const removed = [];
+        for (const item of this.chunks) {
+            const { cx, cy, cz } = item[1];
+            const remove = Math.abs(cx - dx) > kChunkRadiusX + 1 ||
+                Math.abs(cy - dy) > kChunkRadiusY + 1 ||
+                Math.abs(cz - dz) > kChunkRadiusX + 1 ||
+                this.distance(cx, cy, cz, x, y, z) > hi;
+            if (remove)
+                removed.push(item);
+        }
+        for (const [key, chunk] of removed) {
+            if (chunk.mesh)
+                chunk.mesh.dispose();
+            if (chunk.sprites)
+                this.remeshSprites(chunk, false);
+            this.chunks.delete(key);
+        }
+        const result = [];
+        for (let i = dx - kChunkRadiusX; i <= dx + kChunkRadiusX; i++) {
+            for (let j = dy - kChunkRadiusY; j <= dy + kChunkRadiusY; j++) {
+                for (let k = dz - kChunkRadiusX; k <= dz + kChunkRadiusX; k++) {
+                    if (this.distance(i, j, k, x, y, z) > lo)
+                        continue;
+                    const chunk = this.getChunk(i, j, k, true);
+                    if (chunk && !chunk.loaded)
+                        result.push(chunk);
+                }
+            }
+        }
+        return result;
+    }
+    remesh() {
+        for (const chunk of this.chunks.values()) {
+            if (!chunk.dirty || !chunk.voxels)
+                continue;
+            if (!chunk.sprites) {
+                this.remeshSprites(chunk, true);
+                chunk.sprites = true;
+            }
+            if (chunk.mesh)
+                chunk.mesh.dispose();
+            chunk.mesh = this.mesher.mesh(chunk.voxels);
+            if (chunk.mesh) {
+                const { cx, cy, cz, mesh } = chunk;
+                mesh.position.copyFromFloats(cx << kChunkBits, cy << kChunkBits, cz << kChunkBits);
+                mesh.cullingStrategy = BABYLON.AbstractMesh.CULLINGSTRATEGY_STANDARD;
+                mesh.doNotSyncBoundingInfo = true;
+                mesh.freezeWorldMatrix();
+                mesh.freezeNormals();
+            }
+            chunk.dirty = false;
+        }
+    }
+    distance(cx, cy, cz, x, y, z) {
+        const half = kChunkSize / 2;
+        const i = (cx << kChunkBits) + half - x;
+        const j = (cy << kChunkBits) + half - y;
+        const k = (cz << kChunkBits) + half - z;
+        return i * i + j * j + k * k;
+    }
+    remeshSprites(chunk, add) {
+        const voxels = nonnull(chunk.voxels);
+        const dx = chunk.cx << kChunkBits;
+        const dy = chunk.cy << kChunkBits;
+        const dz = chunk.cz << kChunkBits;
+        for (let x = 0; x < kChunkSize; x++) {
+            for (let y = 0; y < kChunkSize; y++) {
+                for (let z = 0; z < kChunkSize; z++) {
+                    const cell = voxels.get(x, y, z);
+                    const mesh = this.registry._meshes[cell];
+                    if (!mesh)
+                        continue;
+                    add ? this.sprites.add(x + dx, y + dy, z + dz, cell, mesh)
+                        : this.sprites.remove(x + dx, y + dy, z + dz, cell);
+                }
+            }
+        }
+    }
+}
+;
+//////////////////////////////////////////////////////////////////////////////
+class Env {
+    constructor(id) {
+        this.container = new Container(id);
+        this.entities = new EntityComponentSystem();
+        this.registry = new Registry();
+        this.renderer = new Renderer(this.container);
+        this.timing = new Timing(this.render.bind(this), this.update.bind(this));
+        this.world = new World(this.registry, this.renderer);
     }
     refresh() {
         const saved = this.container.inputs.pointer;
@@ -765,22 +868,15 @@ class Env {
         const deltas = this.container.deltas;
         camera.applyInputs(deltas.x, deltas.y, deltas.scroll);
         deltas.x = deltas.y = deltas.scroll = 0;
-        this.sprites.update(camera.heading);
+        this.world.sprites.update(camera.heading);
         this.entities.render(dt);
         this.renderer.render();
     }
     update(dt) {
         if (!this.container.inputs.pointer)
             return;
-        if (this._terrainDirty) {
-            if (this._mesh)
-                this._mesh.dispose();
-            this._mesh = this.mesher.mesh(this.voxels);
-            if (this._mesh)
-                this.renderer.addMesh(this._mesh, false);
-            this._terrainDirty = false;
-        }
         this.entities.update(dt);
+        this.world.remesh();
     }
 }
 ;
@@ -796,6 +892,7 @@ class TypedEnv extends Env {
         this.mesh = ents.registerComponent('mesh', Mesh(this));
         this.shadow = ents.registerComponent('shadow', Shadow(this));
         this.target = ents.registerComponent('camera-target', CameraTarget(this));
+        this.center = ents.registerComponent('recenter-world', RecenterWorld(this));
     }
 }
 ;
@@ -852,7 +949,10 @@ const runPhysics = (env, dt, state) => {
     // Update our state based on the computations above.
     Vec3.add(state.vel, state.vel, kTmpDelta);
     Vec3.scale(kTmpDelta, state.vel, dt);
-    sweep(state.min, state.max, kTmpDelta, state.resting, (p) => env.getBlock(p[0], p[1], p[2]) === 0);
+    sweep(state.min, state.max, kTmpDelta, state.resting, (p) => {
+        const block = env.world.getBlock(p[0], p[1], p[2]);
+        return !env.registry._solid[block];
+    });
     Vec3.set(state.forces, 0, 0, 0);
     Vec3.set(state.impulses, 0, 0, 0);
     for (let i = 0; i < 3; i++) {
@@ -977,7 +1077,7 @@ const Movement = (env) => ({
         runningFriction: 0,
         standingFriction: 2,
         airMoveMultiplier: 0.5,
-        airJumps: 1,
+        airJumps: 9999,
         jumpTime: 500,
         jumpForce: 15,
         jumpImpulse: 10,
@@ -994,14 +1094,9 @@ const Movement = (env) => ({
 const setMesh = (env, state, mesh) => {
     if (state.mesh)
         state.mesh.dispose();
-    env.renderer.addMesh(mesh, true);
-    const billboards = env.sprites.billboards;
+    const billboards = env.world.sprites.billboards;
     mesh.onDisposeObservable.add(() => drop(billboards, mesh));
     billboards.push(mesh);
-    const position = env.position.getX(state.id);
-    mesh.scaling.x = position.h;
-    mesh.scaling.y = position.h;
-    mesh.scaling.z = position.h;
     const texture = (() => {
         const material = mesh.material;
         if (!(material instanceof BABYLON.StandardMaterial))
@@ -1028,9 +1123,11 @@ const Mesh = (env) => ({
     },
     onRender: (dt, states) => {
         for (const state of states) {
-            const { x, y, z } = env.position.getX(state.id);
-            if (state.mesh)
-                state.mesh.position.copyFromFloats(x, y, z);
+            if (!state.mesh)
+                continue;
+            const { x, y, z, h } = env.position.getX(state.id);
+            const dy = (state.mesh.scaling.y - h) / 2;
+            state.mesh.position.copyFromFloats(x, y + dy, z);
         }
     },
     onUpdate: (dt, states) => {
@@ -1063,6 +1160,7 @@ const Shadow = (env) => {
     const scene = env.renderer.scene;
     const option = { radius: 1, tessellation: 16 };
     const shadow = BABYLON.CreateDisc('shadow', option, scene);
+    shadow.cullingStrategy = BABYLON.AbstractMesh.CULLINGSTRATEGY_STANDARD;
     scene.removeMesh(shadow);
     shadow.material = material;
     shadow.rotation.x = Math.PI / 2;
@@ -1071,9 +1169,7 @@ const Shadow = (env) => {
         init: () => ({ id: kNoEntity, index: 0, mesh: null, extent: 8, height: 0 }),
         onAdd: (state) => {
             const instance = shadow.createInstance('shadow-instance');
-            const mesh = instance;
-            env.renderer.addMesh(mesh, true);
-            state.mesh = mesh;
+            state.mesh = instance;
         },
         onRemove: (state) => {
             if (state.mesh)
@@ -1084,7 +1180,7 @@ const Shadow = (env) => {
                 if (!state.mesh)
                     continue;
                 const { x, y, z, w } = env.position.getX(state.id);
-                state.mesh.position.copyFromFloats(x, state.height + 0.01, z);
+                state.mesh.position.copyFromFloats(x, state.height + 0.05, z);
                 const fraction = 1 - (y - state.height) / state.extent;
                 const scale = w * Math.max(0, Math.min(1, fraction)) / 2;
                 state.mesh.scaling.copyFromFloats(scale, scale, scale);
@@ -1099,7 +1195,7 @@ const Shadow = (env) => {
                 state.height = (() => {
                     for (let i = 0; i < state.extent; i++) {
                         const h = y - i;
-                        if (env.voxels.get(x, h - 1, z) !== 0)
+                        if (env.world.getBlock(x, h - 1, z) !== kEmptyBlock)
                             return h;
                     }
                     return y - state.extent;
@@ -1113,8 +1209,30 @@ const CameraTarget = (env) => ({
     init: () => ({ id: kNoEntity, index: 0 }),
     onRender: (dt, states) => {
         for (const state of states) {
+            const { x, y, z, h } = env.position.getX(state.id);
+            env.renderer.camera.setTarget(x, y + h / 3, z);
+        }
+    },
+});
+// RecenterWorld signifies that we'll load the world around an entity.
+const kNumChunksToLoad = 1;
+let loadChunkData = (chunk) => null;
+const RecenterWorld = (env) => ({
+    init: () => ({ id: kNoEntity, index: 0 }),
+    onUpdate: (dt, states) => {
+        for (const state of states) {
             const position = env.position.getX(state.id);
-            env.renderer.camera.setTarget(position.x, position.y, position.z);
+            const chunks = env.world.recenter(position.x, position.y, position.z);
+            let remainder = kNumChunksToLoad;
+            for (const chunk of chunks) {
+                chunk.loaded = true;
+                chunk.voxels = loadChunkData(chunk);
+                if (chunk.voxels)
+                    remainder--;
+                if (!remainder)
+                    return;
+            }
+            break;
         }
     },
 });
@@ -1125,15 +1243,16 @@ const main = () => {
     env.renderer.startInstrumentation();
     const player = env.entities.addEntity();
     const position = env.position.add(player);
-    position.x = 8;
-    position.y = 8;
-    position.z = 1.5;
+    position.x = 2;
+    position.y = 5;
+    position.z = 2;
     position.w = 0.6;
-    position.h = 1.0;
+    position.h = 0.8;
     env.physics.add(player);
     env.movement.add(player);
     env.shadow.add(player);
     env.target.add(player);
+    env.center.add(player);
     const mesh = env.mesh.add(player);
     setMesh(env, mesh, sprite('player'));
     const registry = env.registry;
@@ -1149,37 +1268,47 @@ const main = () => {
     const tree = registry.addBlockSprite(sprite('tree'), true);
     const tree0 = registry.addBlockSprite(sprite('tree0'), true);
     const tree1 = registry.addBlockSprite(sprite('tree1'), true);
-    const size = Constants.CHUNK_SIZE;
-    const pl = size / 4;
-    const pr = 3 * size / 4;
-    const layers = [ground, ground, grass, wall, tree0, tree1];
-    for (let x = 0; x < size; x++) {
-        for (let z = 0; z < size; z++) {
-            const edge = x === 0 || x === size - 1 || z === 0 || z === size - 1;
-            const height = Math.min(edge ? layers.length : 3, size);
-            for (let y = 0; y < height; y++) {
-                assert(env.getBlock(x, y, z) === 0);
-                env.setBlock(x, y, z, layers[y]);
-            }
-            if (edge)
-                continue;
-            const test = Math.random();
-            const limit = 0.05;
-            if (test < 1 * limit) {
-                env.setBlock(x, 3, z, rock);
-            }
-            else if (test < 2 * limit) {
-                env.setBlock(x, 3, z, tree);
-            }
-            else if (test < 3 * limit) {
-                env.setBlock(x, 3, z, wall);
-            }
-            else if (test < 4 * limit) {
-                env.setBlock(x, 3, z, tree0);
-                env.setBlock(x, 4, z, tree1);
+    loadChunkData = (chunk) => {
+        if (chunk.cx < 0 || chunk.cz < 0)
+            return null;
+        if (chunk.cy !== 0)
+            return null;
+        const size = kChunkSize;
+        const voxels = new Tensor3(size, size, size);
+        console.log(`Loading chunk: (${chunk.cx}, ${chunk.cy}, ${chunk.cz})`);
+        const pl = size / 4;
+        const pr = 3 * size / 4;
+        const layers = [ground, ground, grass, wall, tree0, tree1];
+        for (let x = 0; x < size; x++) {
+            for (let z = 0; z < size; z++) {
+                const edge = (chunk.cx === 0 && x === 0) ||
+                    (chunk.cz === 0 && z === 0);
+                const height = Math.min(edge ? layers.length : 3, size);
+                for (let y = 0; y < height; y++) {
+                    assert(voxels.get(x, y, z) === 0);
+                    voxels.set(x, y, z, layers[y]);
+                }
+                if (edge)
+                    continue;
+                const test = Math.random();
+                const limit = 0.05;
+                if (test < 1 * limit) {
+                    voxels.set(x, 3, z, rock);
+                }
+                else if (test < 2 * limit) {
+                    voxels.set(x, 3, z, tree);
+                }
+                else if (test < 3 * limit) {
+                    voxels.set(x, 3, z, wall);
+                }
+                else if (test < 4 * limit) {
+                    voxels.set(x, 3, z, tree0);
+                    voxels.set(x, 4, z, tree1);
+                }
             }
         }
-    }
+        return voxels;
+    };
     env.refresh();
 };
 window.onload = main;
