@@ -379,6 +379,7 @@ class TerrainMesher {
         const registry = world.registry;
         const renderer = world.renderer;
         this.flatMaterial = renderer.makeStandardMaterial('flat-material');
+        this.flatMaterial.freeze();
         this.registry = registry;
         this.requests = 0;
         this.world = world;
@@ -617,6 +618,9 @@ class TerrainSprites {
             mesh.doNotSyncBoundingInfo = true;
             mesh.freezeWorldMatrix();
             mesh.thinInstanceSetBuffer('matrix', buffer);
+            mesh.setVerticesData('position', kTmpBillboard, true);
+            if (mesh.material)
+                mesh.material.freeze();
         }
         const key = this.key(x, y, z);
         if (data.index.has(key))
@@ -656,7 +660,14 @@ class TerrainSprites {
         }
         data.dirty = true;
     }
-    update(heading) {
+    registerBillboard(mesh) {
+        this.billboards.push(mesh);
+        mesh.setVerticesData('position', kTmpBillboard, true);
+    }
+    unregisterBillboard(mesh) {
+        drop(this.billboards, mesh);
+    }
+    updateBillboards(heading) {
         const cos = kSpriteRadius * Math.cos(heading);
         const sin = kSpriteRadius * Math.sin(heading);
         kTmpBillboard[0] = kTmpBillboard[9] = -cos;
@@ -664,11 +675,15 @@ class TerrainSprites {
         kTmpBillboard[3] = kTmpBillboard[6] = cos;
         kTmpBillboard[5] = kTmpBillboard[8] = -sin;
         for (const mesh of this.billboards) {
-            mesh.setVerticesData('position', kTmpBillboard);
+            const geo = mesh.geometry;
+            if (geo)
+                geo.updateVerticesDataDirectly('position', kTmpBillboard, 0);
         }
         for (const data of this.kinds.values()) {
             if (data.size !== 0) {
-                data.mesh.setVerticesData('position', kTmpBillboard);
+                const geo = data.mesh.geometry;
+                if (geo)
+                    geo.updateVerticesDataDirectly('position', kTmpBillboard, 0);
             }
             if (!data.dirty)
                 continue;
@@ -781,11 +796,13 @@ class Chunk {
         return this.voxels.get(x & mask, y & mask, z & mask);
     }
     setBlock(x, y, z, block) {
-        const mask = kChunkMask;
         const size = kChunkSize;
         if (!this.voxels)
             this.voxels = new Tensor3(size, size, size);
-        const old = this.voxels.get(x & mask, y & mask, z & mask);
+        const xm = x & kChunkMask;
+        const ym = y & kChunkMask;
+        const zm = z & kChunkMask;
+        const old = this.voxels.get(xm, ym, zm);
         if (old === block)
             return;
         const old_mesh = this.world.registry._meshes[old];
@@ -796,9 +813,29 @@ class Chunk {
             if (new_mesh)
                 this.world.sprites.add(x, y, z, block, new_mesh);
         }
-        this.voxels.set(x & mask, y & mask, z & mask, block);
-        this.terrainDirty || (this.terrainDirty = !(old_mesh || old === 0) ||
-            !(new_mesh || block === 0));
+        this.voxels.set(xm, ym, zm, block);
+        if (old_mesh && new_mesh)
+            return;
+        this.terrainDirty = true;
+        const neighbor = (x, y, z) => {
+            const { cx, cy, cz } = this;
+            const chunk = this.world.getChunk(x + cx, y + cy, z + cz, false);
+            if (!(chunk && chunk.finished))
+                return;
+            chunk.terrainDirty = true;
+        };
+        if (xm === 0)
+            neighbor(-1, 0, 0);
+        if (xm === kChunkMask)
+            neighbor(1, 0, 0);
+        if (ym === 0)
+            neighbor(0, -1, 0);
+        if (ym === kChunkMask)
+            neighbor(0, 1, 0);
+        if (zm === 0)
+            neighbor(0, 0, -1);
+        if (zm === kChunkMask)
+            neighbor(0, 0, 1);
     }
     needsRemesh() {
         return this.active && (this.spritesDirty || this.terrainDirty);
@@ -971,7 +1008,7 @@ class Env {
         const deltas = this.container.deltas;
         camera.applyInputs(deltas.x, deltas.y, deltas.scroll);
         deltas.x = deltas.y = deltas.scroll = 0;
-        this.world.sprites.update(camera.heading);
+        this.world.sprites.updateBillboards(camera.heading);
         this.entities.render(dt);
         this.renderer.render();
     }
@@ -1197,9 +1234,9 @@ const Movement = (env) => ({
 const setMesh = (env, state, mesh) => {
     if (state.mesh)
         state.mesh.dispose();
-    const billboards = env.world.sprites.billboards;
-    mesh.onDisposeObservable.add(() => drop(billboards, mesh));
-    billboards.push(mesh);
+    const sprites = env.world.sprites;
+    mesh.onDisposeObservable.add(() => sprites.unregisterBillboard(mesh));
+    sprites.registerBillboard(mesh);
     const texture = (() => {
         const material = mesh.material;
         if (!(material instanceof BABYLON.StandardMaterial))
@@ -1260,6 +1297,7 @@ const Shadow = (env) => {
     material.ambientColor.copyFromFloats(0, 0, 0);
     material.diffuseColor.copyFromFloats(0, 0, 0);
     material.alpha = 0.5;
+    material.freeze();
     const scene = env.renderer.scene;
     const option = { radius: 1, tessellation: 16 };
     const shadow = BABYLON.CreateDisc('shadow', option, scene);
