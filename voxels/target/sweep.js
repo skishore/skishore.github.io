@@ -1,9 +1,10 @@
+import { Vec3 } from './base.js';
 const kSweepShift = 8;
 const kSweepResolution = 1 << kSweepShift;
 const kSweepMask = kSweepResolution - 1;
 const kSpeeds = [0, 0, 0, 0];
 const kDistances = [0, 0, 0, kSweepResolution];
-const kVoxel = [0, 0, 0];
+const kVoxel = Vec3.create();
 const sweep = (min, max, delta, impacts, check) => {
     for (let i = 0; i < 3; i++) {
         min[i] = (min[i] * kSweepResolution) | 0;
@@ -75,5 +76,6 @@ const sweep = (min, max, delta, impacts, check) => {
         max[i] = max[i] / kSweepResolution;
     }
 };
+//////////////////////////////////////////////////////////////////////////////
 export { sweep };
 //# sourceMappingURL=sweep.js.map
