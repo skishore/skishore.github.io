@@ -2,6 +2,7 @@ import { Vec3 } from './base.js';
 import { Geometry } from './renderer.js';
 const kNoMaterial = 0;
 const kEmptyBlock = 0;
+const kSentinel = 1 << 30;
 ;
 ;
 //////////////////////////////////////////////////////////////////////////////
@@ -15,6 +16,12 @@ const kIndexOffsets = {
     C: [0, 2, 1, 0, 3, 2],
     D: [3, 1, 0, 3, 2, 1],
 };
+const kHeightmapSides = [
+    [0, 1, 2, 1, 0, 0x82],
+    [0, 1, 2, -1, 0, 0x82],
+    [2, 0, 1, 0, 1, 0x06],
+    [2, 0, 1, 0, -1, 0x06],
+];
 class TerrainMesher {
     constructor(registry, renderer) {
         this.solid = registry.solid;
@@ -31,6 +38,11 @@ class TerrainMesher {
             this.buildMesh(solid_geo, solid, true),
             this.buildMesh(water_geo, water, false),
         ];
+    }
+    meshFrontier(heightmap, sx, sz, scale, old) {
+        const geo = old ? old.getGeometry() : kCachedGeometryA;
+        this.computeFrontierGeometry(geo, heightmap, sx, sz, scale);
+        return this.buildMesh(geo, old, true);
     }
     buildMesh(geo, old, solid) {
         if (geo.num_indices === 0) {
@@ -121,6 +133,98 @@ class TerrainMesher {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+    computeFrontierGeometry(geo, heightmap, sx, sz, scale) {
+        geo.clear();
+        const stride = 2 * sx;
+        for (let x = 0; x < sx; x++) {
+            for (let z = 0; z < sz; z++) {
+                const offset = 2 * (x + z * sx);
+                const block = heightmap[offset + 0];
+                const height = heightmap[offset + 1];
+                if (block === kEmptyBlock || (block & kSentinel))
+                    continue;
+                const lx = sx - x, lz = sz - z;
+                let w = 1, h = 1;
+                for (let index = offset + stride; w < lz; w++, index += stride) {
+                    const match = heightmap[index + 0] === block &&
+                        heightmap[index + 1] === height;
+                    if (!match)
+                        break;
+                }
+                OUTER: for (; h < lx; h++) {
+                    let index = offset + 2 * h;
+                    for (let i = 0; i < w; i++, index += stride) {
+                        const match = heightmap[index + 0] === block &&
+                            heightmap[index + 1] === height;
+                        if (!match)
+                            break OUTER;
+                    }
+                }
+                const d = 1;
+                const dir = 2 * d;
+                const id = this.getBlockFaceMaterial(block, dir);
+                const material = this.getMaterialData(id);
+                Vec3.set(kTmpPos, x * scale, height, z * scale);
+                const sw = scale * w, sh = scale * h, mask = id << 8;
+                this.addQuad(geo, material, 1, 2, 0, sw, sh, mask, kTmpPos);
+                for (let wi = 0; wi < w; wi++) {
+                    let index = offset + stride * wi;
+                    for (let hi = 0; hi < h; hi++, index += 2) {
+                        heightmap[index] |= kSentinel;
+                    }
+                }
+                z += (w - 1);
+            }
+        }
+        const limit = 2 * sx * sz;
+        for (let i = 0; i < limit; i += 2) {
+            heightmap[i] &= ~kSentinel;
+        }
+        for (let i = 0; i < 4; i++) {
+            const sign = i & 0x1 ? -1 : 1;
+            const d = i & 0x2 ? 2 : 0;
+            const [u, v, ao, li, lj, si, sj] = d === 0
+                ? [1, 2, 0x82, sx, sz, 2, stride]
+                : [0, 1, 0x06, sz, sx, stride, 2];
+            const di = sign > 0 ? si : -si;
+            for (let i = 1; i < li; i++) {
+                let offset = (i - (sign > 0 ? 1 : 0)) * si;
+                for (let j = 0; j < lj; j++, offset += sj) {
+                    const block = heightmap[offset + 0];
+                    const height = heightmap[offset + 1];
+                    if (block === kEmptyBlock)
+                        continue;
+                    const neighbor = heightmap[offset + 1 + di];
+                    if (neighbor >= height)
+                        continue;
+                    let w = 1;
+                    const limit = lj - j;
+                    for (let index = offset + sj; w < limit; w++, index += sj) {
+                        const match = heightmap[index + 0] === block &&
+                            heightmap[index + 1] === height &&
+                            heightmap[index + 1 + di] === neighbor;
+                        if (!match)
+                            break;
+                    }
+                    const px = d === 0 ? i * scale : j * scale;
+                    const pz = d === 0 ? j * scale : i * scale;
+                    const wi = d === 0 ? height - neighbor : scale * w;
+                    const hi = d === 0 ? scale * w : height - neighbor;
+                    Vec3.set(kTmpPos, px, neighbor, pz);
+                    const dir = 2 * d + ((1 - sign) >> 1);
+                    const id = this.getBlockFaceMaterial(block, dir);
+                    const mask = ((sign * id) << 8) | ao;
+                    const material = this.getMaterialData(id);
+                    if (material.color[3] === 1) {
+                        this.addQuad(geo, material, d, u, v, wi, hi, mask, kTmpPos);
+                    }
+                    const extra = w - 1;
+                    offset += extra * sj;
+                    j += extra;
                 }
             }
         }

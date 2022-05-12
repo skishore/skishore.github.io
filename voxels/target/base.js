@@ -19,9 +19,9 @@ const nonnull = (x, message) => {
 };
 ;
 const Vec3 = {
-    create: () => new Float32Array(3),
+    create: () => new Float64Array(3),
     from: (x, y, z) => {
-        const result = new Float32Array(3);
+        const result = new Float64Array(3);
         result[0] = x;
         result[1] = y;
         result[2] = z;
@@ -181,20 +181,6 @@ const Mat4 = {
             d[1] = 0;
             d[2] = 0;
         }
-    },
-    multiplyVec4: (d, a, b) => {
-        const b0 = b[0];
-        const b1 = b[1];
-        const b2 = b[2];
-        const b3 = b[3];
-        const x = a[0] * b0 + a[4] * b[1] + a[8] * b2 + a[12] * b3;
-        const y = a[1] * b0 + a[5] * b[1] + a[9] * b2 + a[13] * b3;
-        const z = a[2] * b0 + a[6] * b[1] + a[10] * b2 + a[14] * b3;
-        const w = a[3] * b0 + a[7] * b[1] + a[11] * b2 + a[15] * b3;
-        d[0] = x;
-        d[1] = y;
-        d[2] = z;
-        d[3] = w;
     },
     perspective: (d, fov, aspect, near, far) => {
         const f = 1 / Math.tan(fov / 2);
