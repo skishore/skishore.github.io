@@ -327,6 +327,7 @@ class Geometry {
             if (upper_bound[2] < z)
                 upper_bound[2] = z;
         }
+        lower_bound[1] -= 1; // because of the vertical "wave" shift
         for (let i = 0; i < 8; i++) {
             const bound = this.bounds[i];
             for (let j = 0; j < 3; j++) {
@@ -349,37 +350,46 @@ Geometry.PositionsOffset = 0;
 Geometry.NormalsOffset = 3;
 Geometry.ColorsOffset = 6;
 Geometry.UVWsOffset = 10;
+Geometry.WaveOffset = 13;
 Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
 const kBasicShader = `
   uniform mat4 u_transform;
+  uniform float u_move;
+  uniform float u_wave;
   in vec3 a_position;
   in vec4 a_color;
   in vec3 a_uvw;
+  in float a_wave;
   out vec4 v_color;
   out vec3 v_uvw;
+  out float v_move;
 
   void main() {
     v_color = a_color;
     v_uvw = a_uvw;
-    gl_Position = u_transform * vec4(a_position, 1.0);
+    v_move = a_wave * u_move;
+    float wave = a_wave * u_wave;
+    vec3 adjusted = a_position - vec3(0, wave, 0);
+    gl_Position = u_transform * vec4(adjusted, 1.0);
   }
 #split
   precision highp float;
   precision highp sampler2DArray;
 
   uniform vec3 u_fogColor;
+  uniform float u_fogDepth;
   uniform sampler2DArray u_texture;
   in vec4 v_color;
   in vec3 v_uvw;
+  in float v_move;
   out vec4 o_color;
 
   void main() {
-    const float kFogHalfLife = 256.0;
-
-    float fog = clamp(exp2(-kFogHalfLife * gl_FragCoord.w), 0.0, 1.0);
-    vec4 color = v_color * texture(u_texture, v_uvw);
+    float fog = clamp(exp2(-u_fogDepth * gl_FragCoord.w), 0.0, 1.0);
+    vec3 index = v_uvw + vec3(v_move, v_move, 0);
+    vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
     if (o_color[3] < 0.5) discard;
   }
@@ -461,6 +471,7 @@ class BasicMesh {
         this.prepareAttribute('a_position', data, 3, Geometry.PositionsOffset);
         this.prepareAttribute('a_color', data, 4, Geometry.ColorsOffset);
         this.prepareAttribute('a_uvw', data, 3, Geometry.UVWsOffset);
+        this.prepareAttribute('a_wave', data, 1, Geometry.WaveOffset);
     }
     prepareAttribute(name, data, size, offset_in_floats) {
         const gl = this.gl;
@@ -510,7 +521,7 @@ const kScreenOverlayShader = `
 `;
 class ScreenOverlay {
     constructor(gl) {
-        this.color = new Float32Array([0, 0, 0, 0]);
+        this.color = new Float32Array([1, 1, 1, 1]);
         this.fog_color = new Float32Array(kDefaultFogColor);
         this.gl = gl;
         this.shader = new Shader(gl, kScreenOverlayShader);
@@ -536,6 +547,9 @@ class ScreenOverlay {
     }
     getFogColor() {
         return this.fog_color;
+    }
+    getFogDepth() {
+        return this.color[3] === 1 ? 256 : 16;
     }
     setColor(color) {
         for (let i = 0; i < 4; i++)
@@ -592,24 +606,31 @@ class Renderer {
         this.shader = new Shader(gl, kBasicShader);
         this.solid_meshes = [];
         this.water_meshes = [];
-        this.fog = this.shader.getUniformLocation('u_fogColor');
+        this.fog_color = this.shader.getUniformLocation('u_fogColor');
+        this.fog_depth = this.shader.getUniformLocation('u_fogDepth');
+        this.move = this.shader.getUniformLocation('u_move');
+        this.wave = this.shader.getUniformLocation('u_wave');
     }
     addBasicMesh(geo, solid) {
         const { gl, atlas, shader } = this;
         const meshes = solid ? this.solid_meshes : this.water_meshes;
         return new BasicMesh(gl, shader, meshes, geo);
     }
-    render() {
+    render(move, wave) {
         const gl = this.gl;
         gl.clearColor(0.8, 0.9, 1, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        this.atlas.bind();
+        this.shader.bind();
+        const fog_color = this.overlay.getFogColor();
+        const fog_depth = this.overlay.getFogDepth();
+        gl.uniform3fv(this.fog_color, fog_color);
+        gl.uniform1f(this.fog_depth, fog_depth);
+        gl.uniform1f(this.move, move);
+        gl.uniform1f(this.wave, wave);
         let drawn = 0;
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
-        this.atlas.bind();
-        this.shader.bind();
-        const fog = this.overlay.getFogColor();
-        gl.uniform3fv(this.fog, fog);
         for (const mesh of this.solid_meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;

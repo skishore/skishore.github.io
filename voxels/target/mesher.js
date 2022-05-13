@@ -39,10 +39,10 @@ class TerrainMesher {
             this.buildMesh(water_geo, water, false),
         ];
     }
-    meshFrontier(heightmap, sx, sz, scale, old) {
+    meshFrontier(heightmap, sx, sz, scale, old, solid) {
         const geo = old ? old.getGeometry() : kCachedGeometryA;
-        this.computeFrontierGeometry(geo, heightmap, sx, sz, scale);
-        return this.buildMesh(geo, old, true);
+        this.computeFrontierGeometry(geo, heightmap, sx, sz, scale, solid);
+        return this.buildMesh(geo, old, solid);
     }
     buildMesh(geo, old, solid) {
         if (geo.num_indices === 0) {
@@ -137,7 +137,7 @@ class TerrainMesher {
             }
         }
     }
-    computeFrontierGeometry(geo, heightmap, sx, sz, scale) {
+    computeFrontierGeometry(geo, heightmap, sx, sz, scale, solid) {
         geo.clear();
         const stride = 2 * sx;
         for (let x = 0; x < sx; x++) {
@@ -184,6 +184,8 @@ class TerrainMesher {
         for (let i = 0; i < limit; i += 2) {
             heightmap[i] &= ~kSentinel;
         }
+        if (!solid)
+            return;
         for (let i = 0; i < 4; i++) {
             const sign = i & 0x1 ? -1 : 1;
             const d = i & 0x2 ? 2 : 0;
@@ -219,9 +221,7 @@ class TerrainMesher {
                     const id = this.getBlockFaceMaterial(block, dir);
                     const mask = ((sign * id) << 8) | ao;
                     const material = this.getMaterialData(id);
-                    if (material.color[3] === 1) {
-                        this.addQuad(geo, material, d, u, v, wi, hi, mask, kTmpPos);
-                    }
+                    this.addQuad(geo, material, d, u, v, wi, hi, mask, kTmpPos);
                     const extra = w - 1;
                     offset += extra * sj;
                     j += extra;
@@ -235,12 +235,20 @@ class TerrainMesher {
         geo.allocateIndices(num_indices + 6);
         const dir = Math.sign(mask);
         const { indices, vertices } = geo;
+        const triangleHint = this.getTriangleHint(mask);
+        const offsets = mask > 0
+            ? (triangleHint ? kIndexOffsets.C : kIndexOffsets.D)
+            : (triangleHint ? kIndexOffsets.A : kIndexOffsets.B);
+        for (let i = 0; i < 6; i++) {
+            indices[num_indices + i] = num_vertices + offsets[i];
+        }
         const Stride = Geometry.Stride;
         const base = Stride * num_vertices;
         const positions_offset = base + Geometry.PositionsOffset;
         const normals_offset = base + Geometry.NormalsOffset;
         const colors_offset = base + Geometry.ColorsOffset;
         const uvws_offset = base + Geometry.UVWsOffset;
+        const wave_offset = base + Geometry.WaveOffset;
         for (let i = 0; i < 3; i++) {
             const p = pos[i];
             vertices[positions_offset + Stride * 0 + i] = p;
@@ -257,13 +265,6 @@ class TerrainMesher {
         vertices[positions_offset + Stride * 2 + u] += w;
         vertices[positions_offset + Stride * 2 + v] += h;
         vertices[positions_offset + Stride * 3 + v] += h;
-        const triangleHint = this.getTriangleHint(mask);
-        const offsets = mask > 0
-            ? (triangleHint ? kIndexOffsets.C : kIndexOffsets.D)
-            : (triangleHint ? kIndexOffsets.A : kIndexOffsets.B);
-        for (let i = 0; i < 6; i++) {
-            indices[num_indices + i] = num_vertices + offsets[i];
-        }
         let textureIndex = material.textureIndex;
         if (textureIndex === 0 && material.texture) {
             textureIndex = this.renderer.atlas.addImage(material.texture);
@@ -277,10 +278,12 @@ class TerrainMesher {
             vertices[colors_offset + Stride * i + 2] = color[2] * ao;
             vertices[colors_offset + Stride * i + 3] = color[3];
         }
+        const wave = material.liquid ? 1 : 0;
         for (let i = 0; i < 4; i++) {
             vertices[uvws_offset + Stride * i + 0] = 0;
             vertices[uvws_offset + Stride * i + 1] = 0;
             vertices[uvws_offset + Stride * i + 2] = textureIndex;
+            vertices[wave_offset + Stride * i] = wave;
         }
         if (d === 2) {
             const wd = -dir * w;

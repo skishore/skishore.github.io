@@ -105,11 +105,11 @@ class Registry {
         });
         return result;
     }
-    addMaterialOfColor(name, color) {
-        this.addMaterialHelper(name, color, null);
+    addMaterialOfColor(name, color, liquid = false) {
+        this.addMaterialHelper(name, color, liquid, null);
     }
-    addMaterialOfTexture(name, texture, color) {
-        this.addMaterialHelper(name, color || kWhite, texture);
+    addMaterialOfTexture(name, texture, color = kWhite, liquid = false) {
+        this.addMaterialHelper(name, color, liquid, texture);
     }
     // faces has 6 elements for each block type: [+x, -x, +y, -y, +z, -z]
     getBlockFaceMaterial(id, face) {
@@ -119,11 +119,11 @@ class Registry {
         assert(0 < id && id <= this.materials.length);
         return this.materials[id - 1];
     }
-    addMaterialHelper(name, color, texture) {
+    addMaterialHelper(name, color, liquid, texture) {
         assert(name.length > 0, () => 'Empty material name!');
         assert(!this.ids.has(name), () => `Duplicate material: ${name}`);
         this.ids.set(name, this.materials.length);
-        this.materials.push({ color, texture, textureIndex: 0 });
+        this.materials.push({ color, liquid, texture, textureIndex: 0 });
     }
 }
 ;
@@ -253,13 +253,18 @@ class Column {
         this.last = last;
         this.size++;
     }
-    height() {
-        return this.last;
-    }
-    top(bedrock) {
-        if (this.size === 0)
+    getNthBlock(n, bedrock) {
+        if (n >= this.size)
             return bedrock;
-        return this.data[2 * this.size - 2];
+        return this.data[2 * n + 0];
+    }
+    getNthLevel(n) {
+        if (n >= this.size)
+            return 0;
+        return this.data[2 * n + 1];
+    }
+    getSize() {
+        return this.size;
     }
 }
 ;
@@ -504,7 +509,9 @@ class Frontier {
         this.meshes = new Map();
         assert(kChunkWidth % kFrontierLOD === 0);
         const side = kChunkWidth / kFrontierLOD;
-        this.heightmap = new Uint32Array((side + 2) * (side + 2) * 2);
+        const size = (side + 2) * (side + 2) * 2;
+        this.solid_heightmap = new Uint32Array(size);
+        this.water_heightmap = new Uint32Array(size);
         this.side = side;
     }
     chunkHidden(chunk) {
@@ -534,28 +541,36 @@ class Frontier {
                 const lod = this.getFrontierChunk(cx, cz, key);
                 const chunk = world.getChunkByKey(key);
                 const mesh = chunk && chunk.hasMesh();
-                if (!mesh && !lod.mesh) {
-                    lod.mesh = this.createLODMesh(cx, cz);
+                if (!mesh && !(lod.solid || lod.water)) {
+                    this.createLODMeshes(cx, cz, lod);
                 }
-                if (lod.mesh)
-                    lod.mesh.show(!mesh);
+                if (lod.solid)
+                    lod.solid.show(!mesh);
+                if (lod.water)
+                    lod.water.show(!mesh);
             }
         }
-        for (const chunk of this.meshes.values()) {
-            const { cx, cz } = chunk;
+        for (const lod of this.meshes.values()) {
+            const { cx, cz } = lod;
             const disable = !(ax <= cx && cx < bx && az <= cz && cz < bz);
-            if (!disable || !chunk.mesh)
+            if (!disable || !(lod.solid || lod.water))
                 continue;
-            chunk.mesh.dispose();
-            chunk.mesh = null;
+            if (lod.solid)
+                lod.solid.dispose();
+            if (lod.water)
+                lod.water.dispose();
+            lod.solid = null;
+            lod.water = null;
         }
     }
-    createLODMesh(cx, cz) {
-        const { column, heightmap, side, world } = this;
-        const { bedrock, loader } = world;
+    createLODMeshes(cx, cz, chunk) {
+        const { column, side, world } = this;
+        const { bedrock, loader, registry } = world;
+        const { solid_heightmap, water_heightmap } = this;
         if (!loader)
-            return null;
+            return;
         assert(kFrontierLOD % 2 === 0);
+        assert(registry.solid[bedrock]);
         const lod = kFrontierLOD;
         const x = cx << kChunkBits, z = cz << kChunkBits;
         const ax = x + lod / 2, az = z + lod / 2;
@@ -563,21 +578,45 @@ class Frontier {
             for (let j = 0; j < side; j++) {
                 loader(ax + i * lod, az + j * lod, column);
                 const offset = 2 * ((i + 1) + (j + 1) * (side + 2));
-                heightmap[offset + 0] = column.top(bedrock);
-                heightmap[offset + 1] = column.height();
+                const size = column.getSize();
+                const last_block = column.getNthBlock(size - 1, bedrock);
+                const last_level = column.getNthLevel(size - 1);
+                if (registry.solid[last_block]) {
+                    solid_heightmap[offset + 0] = last_block;
+                    solid_heightmap[offset + 1] = last_level;
+                    water_heightmap[offset + 0] = 0;
+                    water_heightmap[offset + 1] = 0;
+                }
+                else {
+                    water_heightmap[offset + 0] = last_block;
+                    water_heightmap[offset + 1] = last_level;
+                    for (let i = size; i > 0; i--) {
+                        const block = column.getNthBlock(i - 2, bedrock);
+                        const level = column.getNthLevel(i - 2);
+                        if (!registry.solid[block])
+                            continue;
+                        solid_heightmap[offset + 0] = block;
+                        solid_heightmap[offset + 1] = level;
+                        break;
+                    }
+                }
                 column.clear();
             }
         }
-        const mesh = this.world.mesher.meshFrontier(heightmap, side + 2, side + 2, lod, null);
-        if (mesh)
-            mesh.setPosition(x - lod, 0, z - lod);
-        return mesh;
+        const solid = this.world.mesher.meshFrontier(solid_heightmap, side + 2, side + 2, lod, chunk.solid, true);
+        const water = this.world.mesher.meshFrontier(water_heightmap, side + 2, side + 2, lod, chunk.water, false);
+        if (solid)
+            solid.setPosition(x - lod, 0, z - lod);
+        if (water)
+            water.setPosition(x - lod, 0, z - lod);
+        chunk.solid = solid;
+        chunk.water = water;
     }
     getFrontierChunk(cx, cz, key) {
         const result = this.meshes.get(key);
         if (result)
             return result;
-        const created = { cx, cz, mesh: null };
+        const created = { cx, cz, solid: null, water: null };
         this.meshes.set(key, created);
         return created;
     }
@@ -721,12 +760,15 @@ class World {
 //////////////////////////////////////////////////////////////////////////////
 class Env {
     constructor(id) {
+        this.cameraAlpha = 0;
+        this.cameraBlock = kEmptyBlock;
+        this.cameraColor = kWhite;
+        this.frame = 0;
         this.container = new Container(id);
         this.entities = new EntityComponentSystem();
         this.registry = new Registry();
         this.renderer = new Renderer(this.container.canvas);
         this.world = new World(this.registry, this.renderer);
-        this.cameraBlock = kEmptyBlock;
         this.timing = new Timing(this.render.bind(this), this.update.bind(this));
     }
     refresh() {
@@ -739,13 +781,20 @@ class Env {
     render(dt) {
         if (!this.container.inputs.pointer)
             return;
+        this.frame += 1;
+        if (this.frame === 65536)
+            this.frame = 0;
+        const pos = this.frame / 256;
+        const rad = 2 * Math.PI * pos;
+        const move = 0.25 * (Math.cos(rad) * 0.5 + pos);
+        const wave = 0.05 * (Math.sin(rad) + 3);
         const camera = this.renderer.camera;
         const deltas = this.container.deltas;
         camera.applyInputs(deltas.x, deltas.y, deltas.scroll);
         deltas.x = deltas.y = deltas.scroll = 0;
         this.entities.render(dt);
-        this.updateOverlayColor();
-        const renderer_stats = this.renderer.render();
+        this.updateOverlayColor(wave);
+        const renderer_stats = this.renderer.render(move, wave);
         const timing = this.timing;
         if (timing.updatePerf.frame() % 10 !== 0)
             return;
@@ -764,22 +813,40 @@ class Env {
         const format = (x) => (x / 1000).toFixed(2);
         return `${format(perf.mean())}ms / ${format(perf.max())}ms`;
     }
-    updateOverlayColor() {
+    updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;
-        const block = this.world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
-        if (block === this.cameraBlock)
+        const xi = Math.floor(x), zi = Math.floor(z);
+        const yi = Math.floor(y + wave);
+        const old_block = this.cameraBlock;
+        const new_block = this.world.getBlock(xi, yi, zi);
+        this.cameraBlock = new_block;
+        if (new_block === kEmptyBlock) {
+            const changed = new_block !== old_block;
+            if (changed)
+                this.renderer.setOverlayColor(kWhite);
             return;
-        const color = (() => {
-            if (block === kEmptyBlock)
-                return kWhite;
-            const material = this.registry.getBlockFaceMaterial(block, 3);
-            return this.registry.getMaterialData(material).color;
+        }
+        if (new_block !== old_block) {
+            const material = this.registry.getBlockFaceMaterial(new_block, 3);
+            const color = this.registry.getMaterialData(material).color;
+            this.cameraColor = color.slice();
+            this.cameraAlpha = color[3];
+        }
+        const falloff = (() => {
+            const max = 2, step = 32;
+            const limit = max * step;
+            for (let i = 1; i < limit; i++) {
+                const other = this.world.getBlock(xi, yi + i, zi);
+                if (other === kEmptyBlock)
+                    return Math.pow(2, i / step);
+            }
+            return Math.pow(2, max);
         })();
-        this.cameraBlock = block;
-        this.renderer.setOverlayColor(color);
+        this.cameraColor[3] = 1 - (1 - this.cameraAlpha) / falloff;
+        this.renderer.setOverlayColor(this.cameraColor);
     }
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-export { Column, Env, kWorldHeight };
+export { Column, Env, kEmptyBlock, kWorldHeight };
 //# sourceMappingURL=engine.js.map

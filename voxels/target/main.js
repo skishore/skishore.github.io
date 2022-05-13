@@ -1,5 +1,5 @@
 import { Vec3 } from './base.js';
-import { Env, kWorldHeight } from './engine.js';
+import { Env, kEmptyBlock, kWorldHeight } from './engine.js';
 import { kNoEntity } from './ecs.js';
 import { sweep } from './sweep.js';
 //////////////////////////////////////////////////////////////////////////////
@@ -55,9 +55,15 @@ const applyFriction = (axis, state, dv) => {
 const runPhysics = (env, dt, state) => {
     if (state.mass <= 0)
         return;
+    const [x, y, z] = state.min;
+    const block = env.world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
+    state.inFluid = block !== kEmptyBlock;
     dt = dt / 1000;
+    const drag = state.inFluid ? 2 : 0;
+    const left = Math.max(1 - drag * dt, 0);
+    const gravity = state.inFluid ? 0.25 : 1;
     Vec3.scale(kTmpAcceleration, state.forces, 1 / state.mass);
-    Vec3.add(kTmpAcceleration, kTmpAcceleration, kTmpGravity);
+    Vec3.scaleAndAdd(kTmpAcceleration, kTmpAcceleration, kTmpGravity, gravity);
     Vec3.scale(kTmpDelta, kTmpAcceleration, dt);
     Vec3.scaleAndAdd(kTmpDelta, kTmpDelta, state.impulses, 1 / state.mass);
     if (state.friction) {
@@ -67,6 +73,7 @@ const runPhysics = (env, dt, state) => {
     }
     // Update our state based on the computations above.
     Vec3.add(state.vel, state.vel, kTmpDelta);
+    Vec3.scale(state.vel, state.vel, left);
     Vec3.scale(kTmpDelta, state.vel, dt);
     sweep(state.min, state.max, kTmpDelta, state.resting, (p) => {
         const block = env.world.getBlock(p[0], p[1], p[2]);
@@ -89,6 +96,7 @@ const Physics = (env) => ({
         forces: Vec3.create(),
         impulses: Vec3.create(),
         resting: Vec3.create(),
+        inFluid: false,
         friction: 0,
         mass: 1,
     }),
@@ -115,23 +123,26 @@ const handleJumping = (dt, state, body, grounded) => {
             return;
         const delta = state._jumpTimeLeft <= dt ? state._jumpTimeLeft / dt : 1;
         const force = state.jumpForce * delta;
+        state._jumpTimeLeft -= dt;
         body.forces[1] += force;
         return;
     }
     const hasAirJumps = state._jumpCount < state.airJumps;
-    const canJump = grounded || hasAirJumps;
+    const canJump = grounded || body.inFluid || hasAirJumps;
     if (!canJump)
         return;
     state._jumped = true;
     state._jumpTimeLeft = state.jumpTime;
-    body.impulses[1] += state.jumpImpulse;
+    const penalty = body.inFluid ? state.swimPenalty : 1;
+    body.impulses[1] += state.jumpImpulse * penalty;
     if (grounded)
         return;
     body.vel[1] = Math.max(body.vel[1], 0);
     state._jumpCount++;
 };
 const handleRunning = (dt, state, body, grounded) => {
-    const speed = state.maxSpeed;
+    const penalty = body.inFluid ? state.swimPenalty : 1;
+    const speed = penalty * state.maxSpeed;
     Vec3.set(kTmpDelta, 0, 0, speed);
     Vec3.rotateY(kTmpDelta, kTmpDelta, state.heading);
     Vec3.sub(kTmpPush, kTmpDelta, body.vel);
@@ -192,12 +203,13 @@ const Movement = (env) => ({
         jumping: false,
         maxSpeed: 10,
         moveForce: 30,
+        swimPenalty: 0.5,
         responsiveness: 15,
         runningFriction: 0,
         standingFriction: 2,
         airMoveMultiplier: 0.5,
-        airJumps: 9999,
-        jumpTime: 500,
+        airJumps: 0,
+        jumpTime: 0.2,
         jumpForce: 15,
         jumpImpulse: 10,
         _jumped: false,
@@ -306,8 +318,8 @@ const main = () => {
     env.movement.add(player);
     env.target.add(player);
     const registry = env.registry;
-    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.7]);
-    registry.addMaterialOfTexture('water', 'images/water.png', [0.2, 0.2, 0.6, 0.6]);
+    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.6], true);
+    registry.addMaterialOfTexture('water', 'images/water.png', [0.2, 0.5, 0.8, 0.8], true);
     const textures = ['dirt', 'grass', 'ground', 'wall'];
     for (const texture of textures) {
         registry.addMaterialOfTexture(texture, `images/${texture}.png`);
