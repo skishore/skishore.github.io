@@ -16,8 +16,9 @@ class Camera {
         this.transform = Mat4.create();
         this.projection = Mat4.create();
         this.view = Mat4.create();
-        const aspect = height ? width / height : 1;
-        Mat4.perspective(this.projection, 3 * Math.PI / 8, aspect, 0.01);
+        this.aspect = height ? width / height : 1;
+        this.minZ = 0;
+        this.setMinZ(0.1);
         this.planes = Array(4).fill(null);
         for (let i = 0; i < 4; i++)
             this.planes[i] = { x: 0, y: 0, z: 0, index: 0 };
@@ -89,6 +90,12 @@ class Camera {
         Mat4.view(this.view, kTmpDelta, this.direction);
         Mat4.multiply(this.transform_for, this.projection, this.view);
         return this.transform_for;
+    }
+    setMinZ(minZ) {
+        if (minZ === this.minZ)
+            return;
+        Mat4.perspective(this.projection, 3 * Math.PI / 8, this.aspect, minZ);
+        this.minZ = minZ;
     }
     setTarget(x, y, z) {
         Vec3.set(this.position, x, y, z);
@@ -391,7 +398,7 @@ const kBasicShader = `
     vec3 index = v_uvw + vec3(v_move, v_move, 0);
     vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
-    if (o_color[3] < 0.5) discard;
+    if (o_color[3] < 0.25) discard;
   }
 `;
 class BasicMesh {
@@ -549,7 +556,7 @@ class ScreenOverlay {
         return this.fog_color;
     }
     getFogDepth() {
-        return this.color[3] === 1 ? 256 : 16;
+        return this.color[3] === 1 ? 4096 : 16;
     }
     setColor(color) {
         for (let i = 0; i < 4; i++)
@@ -636,10 +643,12 @@ class Renderer {
                 drawn++;
         }
         gl.disable(gl.CULL_FACE);
+        gl.depthMask(false);
         for (const mesh of this.water_meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
+        gl.depthMask(true);
         gl.enable(gl.CULL_FACE);
         this.overlay.draw();
         const total = this.solid_meshes.length + this.water_meshes.length;

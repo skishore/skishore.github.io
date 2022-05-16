@@ -64,7 +64,7 @@ class TerrainMesher {
             const dir = d * 2;
             const u = (d + 1) % 3;
             const v = (d + 2) % 3;
-            const ld = shape[d] - 2, lu = shape[u] - 2, lv = shape[v] - 2;
+            const ld = shape[d] - 1, lu = shape[u] - 2, lv = shape[v] - 2;
             const sd = stride[d], su = stride[u], sv = stride[v];
             const base = su + sv;
             Vec3.set(kTmpPos, 0, 0, 0);
@@ -97,6 +97,18 @@ class TerrainMesher {
                             ? this.packAOMask(data, index + sd, index, su, sv)
                             : this.packAOMask(data, index, index + sd, su, sv);
                         kMaskData[n] = (mask << 8) | ao;
+                    }
+                }
+                if (id === 0) {
+                    for (let i = 0; i < area; i++) {
+                        if (kMaskData[i] > 0)
+                            kMaskData[i] = 0;
+                    }
+                }
+                else if (id === ld - 1) {
+                    for (let i = 0; i < area; i++) {
+                        if (kMaskData[i] < 0)
+                            kMaskData[i] = 0;
                     }
                 }
                 n = 0;
@@ -217,8 +229,11 @@ class TerrainMesher {
                     const wi = d === 0 ? height - neighbor : scale * w;
                     const hi = d === 0 ? scale * w : height - neighbor;
                     Vec3.set(kTmpPos, px, neighbor, pz);
-                    const dir = 2 * d + ((1 - sign) >> 1);
-                    const id = this.getBlockFaceMaterial(block, dir);
+                    // We could use the material at the side of the block with:
+                    //  const dir = 2 * d + ((1 - sign) >> 1);
+                    //
+                    // But doing so muddles grass, etc. textures at a distance.
+                    const id = this.getBlockFaceMaterial(block, 2);
                     const mask = ((sign * id) << 8) | ao;
                     const material = this.getMaterialData(id);
                     this.addQuad(geo, material, d, u, v, wi, hi, mask, kTmpPos);

@@ -131,9 +131,12 @@ const handleJumping = (dt, state, body, grounded) => {
     const canJump = grounded || body.inFluid || hasAirJumps;
     if (!canJump)
         return;
+    const height = body.min[1];
+    const factor = height / kWorldHeight;
+    const density = factor > 1 ? Math.exp(1 - factor) : 1;
+    const penalty = body.inFluid ? state.swimPenalty : density;
     state._jumped = true;
     state._jumpTimeLeft = state.jumpTime;
-    const penalty = body.inFluid ? state.swimPenalty : 1;
     body.impulses[1] += state.jumpImpulse * penalty;
     if (grounded)
         return;
@@ -208,7 +211,7 @@ const Movement = (env) => ({
         runningFriction: 0,
         standingFriction: 2,
         airMoveMultiplier: 0.5,
-        airJumps: 0,
+        airJumps: 9999,
         jumpTime: 0.2,
         jumpForce: 15,
         jumpImpulse: 10,
@@ -318,34 +321,35 @@ const main = () => {
     env.movement.add(player);
     env.target.add(player);
     const registry = env.registry;
-    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.6], true);
-    registry.addMaterialOfTexture('water', 'images/water.png', [0.2, 0.5, 0.8, 0.8], true);
-    const textures = ['dirt', 'grass', 'ground', 'wall'];
+    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.4], true);
+    registry.addMaterialOfTexture('water', 'images/mc_water.png', [1, 1, 1, 0.8], true);
+    const textures = ['bedrock', 'grass', 'grass_dirt', 'dirt', 'sand', 'snow', 'stone'];
     for (const texture of textures) {
-        registry.addMaterialOfTexture(texture, `images/${texture}.png`);
+        registry.addMaterialOfTexture(texture, `images/mc_${texture}.png`);
     }
-    const wall = registry.addBlock(['wall'], true);
+    const rock = registry.addBlock(['stone'], true);
     const dirt = registry.addBlock(['dirt'], true);
-    const grass = registry.addBlock(['grass', 'dirt', 'dirt'], true);
-    const ground = registry.addBlock(['ground', 'dirt', 'dirt'], true);
+    const sand = registry.addBlock(['sand'], true);
+    const snow = registry.addBlock(['snow'], true);
+    const grass = registry.addBlock(['grass', 'dirt', 'grass_dirt'], true);
+    const bedrock = registry.addBlock(['bedrock'], true);
     const water = registry.addBlock(['water', 'blue', 'blue'], false);
     const H = kWorldHeight;
     const S = Math.floor(kWorldHeight / 2);
-    const tiles = [[wall, S - 3], [dirt, S - 1], [ground, S + 1], [grass, H]];
+    const tiles = [[dirt, S - 2], [sand, S + 1], [grass, S + 31], [dirt, S + 33], [snow, H]];
     const noise = fractalPerlin2D(2, 8, 1.0, 6);
     const loader = (x, z, column) => {
         let last = 0;
-        const target = Math.round(noise(x, z) + H / 2);
+        const target = Math.max(Math.round(noise(x, z) + H / 2), 0);
         for (const [tile, height] of tiles) {
             const next = Math.min(height, target);
             column.push(tile, next - last);
             if ((last = next) === target)
                 break;
         }
-        if (last < S)
-            column.push(water, S - last);
+        column.push(water, S - last);
     };
-    env.world.setLoader(wall, loader);
+    env.world.setLoader(bedrock, loader);
     env.refresh();
 };
 window.onload = main;
