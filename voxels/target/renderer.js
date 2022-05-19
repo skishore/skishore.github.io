@@ -358,17 +358,20 @@ Geometry.NormalsOffset = 3;
 Geometry.ColorsOffset = 6;
 Geometry.UVWsOffset = 10;
 Geometry.WaveOffset = 13;
+Geometry.MaskOffset = 14;
 Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
 const kBasicShader = `
-  uniform mat4 u_transform;
+  uniform int u_mask;
   uniform float u_move;
   uniform float u_wave;
+  uniform mat4 u_transform;
   in vec3 a_position;
   in vec4 a_color;
   in vec3 a_uvw;
   in float a_wave;
+  in float a_mask;
   out vec4 v_color;
   out vec3 v_uvw;
   out float v_move;
@@ -380,6 +383,7 @@ const kBasicShader = `
     float wave = a_wave * u_wave;
     vec3 adjusted = a_position - vec3(0, wave, 0);
     gl_Position = u_transform * vec4(adjusted, 1.0);
+    if ((u_mask & int(a_mask)) != 0) gl_Position[3] = 0.0;
   }
 #split
   precision highp float;
@@ -401,25 +405,41 @@ const kBasicShader = `
     if (o_color[3] < 0.25) discard;
   }
 `;
+class BasicShader extends Shader {
+    constructor(gl) {
+        super(gl, kBasicShader);
+        this.u_mask = this.getUniformLocation('u_mask');
+        this.u_move = this.getUniformLocation('u_move');
+        this.u_wave = this.getUniformLocation('u_wave');
+        this.u_transform = this.getUniformLocation('u_transform');
+        this.u_fogColor = this.getUniformLocation('u_fogColor');
+        this.u_fogDepth = this.getUniformLocation('u_fogDepth');
+        this.a_position = this.getAttribLocation('a_position');
+        this.a_color = this.getAttribLocation('a_color');
+        this.a_uvw = this.getAttribLocation('a_uvw');
+        this.a_wave = this.getAttribLocation('a_wave');
+        this.a_mask = this.getAttribLocation('a_mask');
+    }
+}
+;
 class BasicMesh {
-    constructor(gl, shader, meshes, geo) {
+    constructor(gl, shader, geo, meshes, hidden_meshes) {
         const index = meshes.length;
         meshes.push(this);
         this.gl = gl;
         this.shader = shader;
-        this.meshes = meshes;
         this.geo = geo;
+        this.meshes = meshes;
+        this.hidden_meshes = hidden_meshes;
         this.vao = null;
-        this.transform = shader.getUniformLocation('u_transform');
         this.indices = null;
         this.vertices = null;
         this.position = Vec3.create();
         this.index = index;
         this.shown = true;
+        this.mask = 0;
     }
     draw(camera, planes) {
-        if (!this.shown)
-            return false;
         const position = this.position;
         Vec3.sub(kTmpDelta, position, camera.position);
         if (this.geo.cull(kTmpDelta, planes))
@@ -429,20 +449,14 @@ class BasicMesh {
         const gl = this.gl;
         gl.bindVertexArray(this.vao);
         gl.bindBuffer(ELEMENT_ARRAY_BUFFER, this.indices);
-        gl.uniformMatrix4fv(this.transform, false, transform);
+        gl.uniform1i(this.shader.u_mask, this.mask);
+        gl.uniformMatrix4fv(this.shader.u_transform, false, transform);
         gl.drawElements(gl.TRIANGLES, this.geo.num_indices, gl.UNSIGNED_INT, 0);
         return true;
     }
     dispose() {
         this.destroyBuffers();
-        assert(this === this.meshes[this.index]);
-        const last = this.meshes.length - 1;
-        if (this.index !== last) {
-            const swap = this.meshes[last];
-            this.meshes[this.index] = swap;
-            swap.index = this.index;
-        }
-        this.meshes.pop();
+        this.removeFromMeshes();
     }
     getGeometry() {
         return this.geo;
@@ -454,8 +468,15 @@ class BasicMesh {
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
     }
-    show(value) {
-        this.shown = value;
+    show(mask, shown) {
+        this.mask = mask;
+        if (shown === this.shown)
+            return;
+        this.removeFromMeshes();
+        const meshes = shown ? this.meshes : this.hidden_meshes;
+        this.index = meshes.length;
+        this.shown = shown;
+        meshes.push(this);
     }
     destroyBuffers() {
         const gl = this.gl;
@@ -469,22 +490,22 @@ class BasicMesh {
     prepareBuffers() {
         if (this.vao)
             return;
-        const gl = this.gl;
+        const { gl, shader } = this;
         this.vao = nonnull(gl.createVertexArray());
         gl.bindVertexArray(this.vao);
         const data = this.geo.vertices;
         this.prepareIndices(this.geo.indices);
         this.prepareVertices(this.geo.vertices);
-        this.prepareAttribute('a_position', data, 3, Geometry.PositionsOffset);
-        this.prepareAttribute('a_color', data, 4, Geometry.ColorsOffset);
-        this.prepareAttribute('a_uvw', data, 3, Geometry.UVWsOffset);
-        this.prepareAttribute('a_wave', data, 1, Geometry.WaveOffset);
+        this.prepareAttribute(shader.a_position, data, 3, Geometry.PositionsOffset);
+        this.prepareAttribute(shader.a_color, data, 4, Geometry.ColorsOffset);
+        this.prepareAttribute(shader.a_uvw, data, 3, Geometry.UVWsOffset);
+        this.prepareAttribute(shader.a_wave, data, 1, Geometry.WaveOffset);
+        this.prepareAttribute(shader.a_mask, data, 1, Geometry.MaskOffset);
     }
-    prepareAttribute(name, data, size, offset_in_floats) {
-        const gl = this.gl;
-        const location = this.shader.getAttribLocation(name);
+    prepareAttribute(location, data, size, offset_in_floats) {
         if (location === null)
             return;
+        const gl = this.gl;
         const offset = 4 * offset_in_floats;
         const stride = 4 * Geometry.Stride;
         gl.enableVertexAttribArray(location);
@@ -504,6 +525,17 @@ class BasicMesh {
         gl.bufferData(ARRAY_BUFFER, data, gl.STATIC_DRAW);
         this.vertices = buffer;
     }
+    removeFromMeshes() {
+        const meshes = this.shown ? this.meshes : this.hidden_meshes;
+        assert(this === meshes[this.index]);
+        const last = meshes.length - 1;
+        if (this.index !== last) {
+            const swap = meshes[last];
+            meshes[this.index] = swap;
+            swap.index = this.index;
+        }
+        meshes.pop();
+    }
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
@@ -516,7 +548,6 @@ const kScreenOverlayShader = `
   }
 #split
   precision highp float;
-  precision highp sampler2DArray;
 
   uniform vec4 u_color;
 
@@ -526,13 +557,20 @@ const kScreenOverlayShader = `
     o_color = u_color;
   }
 `;
+class ScreenOverlayShader extends Shader {
+    constructor(gl) {
+        super(gl, kScreenOverlayShader);
+        this.u_color = this.getUniformLocation('u_color');
+        this.a_position = this.getAttribLocation('a_position');
+    }
+}
+;
 class ScreenOverlay {
     constructor(gl) {
         this.color = new Float32Array([1, 1, 1, 1]);
         this.fog_color = new Float32Array(kDefaultFogColor);
         this.gl = gl;
-        this.shader = new Shader(gl, kScreenOverlayShader);
-        this.uniform = this.shader.getUniformLocation('u_color');
+        this.shader = new ScreenOverlayShader(gl);
         this.vertices = Float32Array.from([
             1, 1, 0, -1, 1, 0, -1, -1, 0,
             1, 1, 0, -1, -1, 0, 1, -1, 0
@@ -548,7 +586,7 @@ class ScreenOverlay {
         const gl = this.gl;
         gl.bindVertexArray(this.vao);
         gl.disable(gl.DEPTH_TEST);
-        gl.uniform4fv(this.uniform, this.color);
+        gl.uniform4fv(this.shader.u_color, this.color);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         gl.enable(gl.DEPTH_TEST);
     }
@@ -575,7 +613,7 @@ class ScreenOverlay {
         const gl = this.gl;
         this.vao = nonnull(gl.createVertexArray());
         gl.bindVertexArray(this.vao);
-        const location = this.shader.getAttribLocation('a_position');
+        const location = this.shader.a_position;
         if (location === null)
             return;
         const buffer = nonnull(gl.createBuffer());
@@ -610,18 +648,15 @@ class Renderer {
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl);
         this.atlas = new TextureAtlas(gl);
-        this.shader = new Shader(gl, kBasicShader);
+        this.shader = new BasicShader(gl);
         this.solid_meshes = [];
         this.water_meshes = [];
-        this.fog_color = this.shader.getUniformLocation('u_fogColor');
-        this.fog_depth = this.shader.getUniformLocation('u_fogDepth');
-        this.move = this.shader.getUniformLocation('u_move');
-        this.wave = this.shader.getUniformLocation('u_wave');
+        this.hidden_meshes = [];
     }
     addBasicMesh(geo, solid) {
-        const { gl, atlas, shader } = this;
+        const { gl, atlas, shader, hidden_meshes } = this;
         const meshes = solid ? this.solid_meshes : this.water_meshes;
-        return new BasicMesh(gl, shader, meshes, geo);
+        return new BasicMesh(gl, shader, geo, meshes, hidden_meshes);
     }
     render(move, wave) {
         const gl = this.gl;
@@ -631,10 +666,10 @@ class Renderer {
         this.shader.bind();
         const fog_color = this.overlay.getFogColor();
         const fog_depth = this.overlay.getFogDepth();
-        gl.uniform3fv(this.fog_color, fog_color);
-        gl.uniform1f(this.fog_depth, fog_depth);
-        gl.uniform1f(this.move, move);
-        gl.uniform1f(this.wave, wave);
+        gl.uniform1f(this.shader.u_move, move);
+        gl.uniform1f(this.shader.u_wave, wave);
+        gl.uniform3fv(this.shader.u_fogColor, fog_color);
+        gl.uniform1f(this.shader.u_fogDepth, fog_depth);
         let drawn = 0;
         const camera = this.camera;
         const planes = camera.getCullingPlanes();

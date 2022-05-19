@@ -33,15 +33,27 @@ class TerrainMesher {
     meshChunk(voxels, solid, water) {
         const solid_geo = solid ? solid.getGeometry() : kCachedGeometryA;
         const water_geo = water ? water.getGeometry() : kCachedGeometryB;
+        solid_geo.clear();
+        water_geo.clear();
         this.computeChunkGeometry(solid_geo, water_geo, voxels);
         return [
             this.buildMesh(solid_geo, solid, true),
             this.buildMesh(water_geo, water, false),
         ];
     }
-    meshFrontier(heightmap, sx, sz, scale, old, solid) {
+    meshFrontier(heightmap, mask, px, pz, sx, sz, scale, old, solid) {
         const geo = old ? old.getGeometry() : kCachedGeometryA;
+        if (!old)
+            geo.clear();
+        const { MaskOffset, PositionsOffset, Stride } = Geometry;
+        const source = Stride * geo.num_vertices;
         this.computeFrontierGeometry(geo, heightmap, sx, sz, scale, solid);
+        const target = Stride * geo.num_vertices;
+        for (let offset = source; offset < target; offset += Stride) {
+            geo.vertices[offset + PositionsOffset + 0] += px;
+            geo.vertices[offset + PositionsOffset + 2] += pz;
+            geo.vertices[offset + MaskOffset] = mask;
+        }
         return this.buildMesh(geo, old, solid);
     }
     buildMesh(geo, old, solid) {
@@ -58,8 +70,6 @@ class TerrainMesher {
     }
     computeChunkGeometry(solid_geo, water_geo, voxels) {
         const { data, shape, stride } = voxels;
-        solid_geo.clear();
-        water_geo.clear();
         for (let d = 0; d < 3; d++) {
             const dir = d * 2;
             const u = (d + 1) % 3;
@@ -150,7 +160,6 @@ class TerrainMesher {
         }
     }
     computeFrontierGeometry(geo, heightmap, sx, sz, scale, solid) {
-        geo.clear();
         const stride = 2 * sx;
         for (let x = 0; x < sx; x++) {
             for (let z = 0; z < sz; z++) {
@@ -264,6 +273,7 @@ class TerrainMesher {
         const colors_offset = base + Geometry.ColorsOffset;
         const uvws_offset = base + Geometry.UVWsOffset;
         const wave_offset = base + Geometry.WaveOffset;
+        const mask_offset = base + Geometry.MaskOffset;
         for (let i = 0; i < 3; i++) {
             const p = pos[i];
             vertices[positions_offset + Stride * 0 + i] = p;
@@ -299,6 +309,7 @@ class TerrainMesher {
             vertices[uvws_offset + Stride * i + 1] = 0;
             vertices[uvws_offset + Stride * i + 2] = textureIndex;
             vertices[wave_offset + Stride * i] = wave;
+            vertices[mask_offset + Stride * i] = 0;
         }
         if (d === 2) {
             const wd = -dir * w;
