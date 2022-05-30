@@ -1,5 +1,6 @@
 import { Vec3 } from './base.js';
-import { Env, kEmptyBlock, kWorldHeight } from './engine.js';
+import { Env } from './engine.js';
+import { kChunkWidth, kEmptyBlock, kWorldHeight } from './engine.js';
 import { kNoEntity } from './ecs.js';
 import { sweep } from './sweep.js';
 //////////////////////////////////////////////////////////////////////////////
@@ -26,7 +27,10 @@ const kTmpFriction = Vec3.create();
 const kTmpDelta = Vec3.create();
 const kTmpSize = Vec3.create();
 const kTmpPush = Vec3.create();
+const kTmpMax = Vec3.create();
+const kTmpMin = Vec3.create();
 const kTmpPos = Vec3.create();
+const kTmpResting = Vec3.create();
 const setPhysicsFromPosition = (a, b) => {
     Vec3.set(kTmpPos, a.x, a.y, a.z);
     Vec3.set(kTmpSize, a.w / 2, a.h / 2, a.w / 2);
@@ -52,9 +56,46 @@ const applyFriction = (axis, state, dv) => {
     state.vel[(axis + 1) % 3] *= scale;
     state.vel[(axis + 2) % 3] *= scale;
 };
+const tryAutoStepping = (dt, state, min, max, check) => {
+    if (state.resting[1] > 0 && !state.inFluid)
+        return;
+    const speed_x = Math.abs(state.vel[0]);
+    const speed_z = Math.abs(state.vel[2]);
+    const step_x = (state.resting[0] !== 0 && speed_x > speed_z);
+    const step_z = (state.resting[2] !== 0 && speed_z > speed_x);
+    if (!step_x && !step_z)
+        return;
+    const height = 1 - min[1] + Math.floor(min[1]);
+    Vec3.set(kTmpDelta, 0, height, 0);
+    sweep(min, max, kTmpDelta, kTmpResting, check);
+    if (kTmpResting[1] !== 0)
+        return;
+    Vec3.scale(kTmpDelta, state.vel, dt);
+    kTmpDelta[1] = 0;
+    sweep(min, max, kTmpDelta, kTmpResting, check);
+    if (min[0] === state.min[0] && min[2] === state.min[2])
+        return;
+    if (height > state.autoStep) {
+        Vec3.set(kTmpDelta, 0, state.autoStep, 0);
+        sweep(state.min, state.max, kTmpDelta, state.resting, check);
+        if (!step_x)
+            state.vel[0] = 0;
+        if (!step_z)
+            state.vel[2] = 0;
+        state.vel[1] = 0;
+        return;
+    }
+    Vec3.copy(state.min, min);
+    Vec3.copy(state.max, max);
+    Vec3.copy(state.resting, kTmpResting);
+};
 const runPhysics = (env, dt, state) => {
     if (state.mass <= 0)
         return;
+    const check = (pos) => {
+        const block = env.world.getBlock(pos[0], pos[1], pos[2]);
+        return !env.registry.solid[block];
+    };
     const [x, y, z] = state.min;
     const block = env.world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
     state.inFluid = block !== kEmptyBlock;
@@ -71,16 +112,20 @@ const runPhysics = (env, dt, state) => {
         applyFriction(1, state, kTmpDelta);
         applyFriction(2, state, kTmpDelta);
     }
+    if (state.autoStep) {
+        Vec3.copy(kTmpMax, state.max);
+        Vec3.copy(kTmpMin, state.min);
+    }
     // Update our state based on the computations above.
     Vec3.add(state.vel, state.vel, kTmpDelta);
     Vec3.scale(state.vel, state.vel, left);
     Vec3.scale(kTmpDelta, state.vel, dt);
-    sweep(state.min, state.max, kTmpDelta, state.resting, (p) => {
-        const block = env.world.getBlock(p[0], p[1], p[2]);
-        return !env.registry.solid[block];
-    });
+    sweep(state.min, state.max, kTmpDelta, state.resting, check);
     Vec3.set(state.forces, 0, 0, 0);
     Vec3.set(state.impulses, 0, 0, 0);
+    if (state.autoStep) {
+        tryAutoStepping(dt, state, kTmpMin, kTmpMax, check);
+    }
     for (let i = 0; i < 3; i++) {
         if (state.resting[i] !== 0)
             state.vel[i] = 0;
@@ -99,6 +144,7 @@ const Physics = (env) => ({
         inFluid: false,
         friction: 0,
         mass: 1,
+        autoStep: 0.25,
     }),
     onAdd: (state) => {
         setPhysicsFromPosition(env.position.getX(state.id), state);
@@ -320,36 +366,157 @@ const main = () => {
     env.physics.add(player);
     env.movement.add(player);
     env.target.add(player);
+    const texture = (x, y, alphaTest = false) => {
+        return { alphaTest, url: 'images/rhodox-edited.png', x, y, w: 16, h: 16 };
+    };
     const registry = env.registry;
     registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.4], true);
-    registry.addMaterialOfTexture('water', 'images/mc_water.png', [1, 1, 1, 0.8], true);
-    const textures = ['bedrock', 'grass', 'grass_dirt', 'dirt', 'sand', 'snow', 'stone'];
-    for (const texture of textures) {
-        registry.addMaterialOfTexture(texture, `images/mc_${texture}.png`);
+    registry.addMaterialOfTexture('water', texture(13, 13), [1, 1, 1, 0.8], true);
+    registry.addMaterialOfTexture('leaves', texture(4, 3, true));
+    const textures = [
+        ['bedrock', 1, 1],
+        ['dirt', 2, 0],
+        ['grass', 0, 0],
+        ['grass-side', 3, 0],
+        ['sand', 0, 11],
+        ['snow', 2, 4],
+        ['stone', 1, 0],
+        ['trunk', 5, 1],
+        ['trunk-side', 4, 1],
+    ];
+    for (const [name, x, y] of textures) {
+        registry.addMaterialOfTexture(name, texture(x, y));
     }
     const rock = registry.addBlock(['stone'], true);
     const dirt = registry.addBlock(['dirt'], true);
     const sand = registry.addBlock(['sand'], true);
     const snow = registry.addBlock(['snow'], true);
-    const grass = registry.addBlock(['grass', 'dirt', 'grass_dirt'], true);
+    const grass = registry.addBlock(['grass', 'dirt', 'grass-side'], true);
     const bedrock = registry.addBlock(['bedrock'], true);
     const water = registry.addBlock(['water', 'blue', 'blue'], false);
+    const trunk = registry.addBlock(['trunk', 'trunk-side'], true);
+    const leaves = registry.addBlock(['leaves'], true);
     const H = kWorldHeight;
     const S = Math.floor(kWorldHeight / 2);
-    const tiles = [[dirt, S - 2], [sand, S + 1], [grass, S + 31], [dirt, S + 33], [snow, H]];
-    const noise = fractalPerlin2D(2, 8, 1.0, 6);
-    const loader = (x, z, column) => {
-        let last = 0;
-        const target = Math.max(Math.round(noise(x, z) + H / 2), 0);
-        for (const [tile, height] of tiles) {
-            const next = Math.min(height, target);
-            column.push(tile, next - last);
-            if ((last = next) === target)
-                break;
-        }
-        column.push(water, S - last);
+    const tiles = [[dirt, S - 2], [sand, S], [grass, S + 30], [dirt, S + 36], [snow, H]];
+    const trees = perlin2D();
+    const valleys = perlin2D();
+    const roughness = perlin2D();
+    const mountains = fractalPerlin2D(2, 8, 1.0, 6);
+    const heightmap = (x, z) => {
+        const a = valleys(x / 64, z / 64);
+        const b = roughness(x / 64, z / 64);
+        const s = 1 / (1 + Math.exp(-16 * (Math.abs(a) / 0.04 - 1)));
+        const t = 1 / (1 + Math.exp(-8 * (b - 0.1)));
+        const m = t * mountains(x, z);
+        const result = m > 0 ? m * s : m;
+        return Math.max(Math.min(Math.round(result + H / 2), H), 0);
     };
-    env.world.setLoader(bedrock, loader);
+    const tree = (x, z, height) => {
+        if (height <= S)
+            return false;
+        const result = trees(x / 17, z / 17);
+        return (((result + 1) * 0x10000) & 0x3ff) <= 8 - height + S;
+    };
+    const kTrunkHeight = 4;
+    const kTreeLeaves = 2;
+    const kTreeRadius = 2;
+    const kSideLength = kChunkWidth + 2 * kTreeRadius;
+    const kChunkCache = new Array(2 * kSideLength * kSideLength).fill(0);
+    let kLastCX = Number.NaN;
+    let kLastCZ = Number.NaN;
+    const loadChunk = (x, z, column) => {
+        const cx = Math.floor(x / kChunkWidth);
+        const cz = Math.floor(z / kChunkWidth);
+        const ax = cx * kChunkWidth - kTreeRadius;
+        const az = cz * kChunkWidth - kTreeRadius;
+        if (cx !== kLastCX || cz !== kLastCZ) {
+            for (let i = 0; i < kSideLength; i++) {
+                for (let j = 0; j < kSideLength; j++) {
+                    const index = i + kSideLength * j;
+                    const target = heightmap(ax + i, az + j);
+                    const has_tree = tree(ax + i, az + j, target);
+                    kChunkCache[2 * index + 0] = target;
+                    kChunkCache[2 * index + 1] = has_tree ? 1 : 0;
+                }
+            }
+            kLastCX = cx;
+            kLastCZ = cz;
+        }
+        const index = (x - ax) + kSideLength * (z - az);
+        const target = kChunkCache[2 * index + 0];
+        const has_tree = kChunkCache[2 * index + 1];
+        for (const [tile, height] of tiles) {
+            if (target > height)
+                continue;
+            column.push(rock, target - 4);
+            column.push(dirt, target - 1);
+            column.push(tile, target);
+            column.push(water, S);
+            if (has_tree) {
+                column.push(trunk, target + kTrunkHeight);
+                column.push(leaves, target + kTrunkHeight + 1);
+            }
+            for (let dx = -kTreeRadius; dx <= kTreeRadius; dx++) {
+                for (let dz = -kTreeRadius; dz <= kTreeRadius; dz++) {
+                    if (dx === 0 && dz === 0)
+                        continue;
+                    const neighbor_index = index + dx + kSideLength * dz;
+                    const neighbor_target = kChunkCache[2 * neighbor_index + 0];
+                    const neighbor_has_tree = kChunkCache[2 * neighbor_index + 1];
+                    if (neighbor_has_tree) {
+                        const adjacent = Math.abs(dx) <= 1 && Math.abs(dz) <= 1;
+                        const start = neighbor_target + kTreeLeaves;
+                        const end = neighbor_target + kTrunkHeight + (adjacent ? 1 : 0);
+                        column.push(kEmptyBlock, start);
+                        column.push(leaves, end);
+                    }
+                }
+            }
+            return;
+        }
+    };
+    const loadFrontier = (x, z, column) => {
+        const target = heightmap(x, z);
+        for (const [tile, height] of tiles) {
+            if (target > height)
+                continue;
+            column.push(tile, target);
+            column.push(water, S);
+            return;
+        }
+    };
+    env.world.setLoader(bedrock, loadChunk, loadFrontier);
+    const perlin = perlin2D();
+    const loadChunkHack = (x, z, column) => {
+        const target = Math.round(8 * perlin(x / 16, z / 16) + S);
+        column.push(dirt, Math.min(target, S - 1));
+        column.push(sand, Math.min(target, S));
+        column.push(grass, target);
+    };
+    //env.world.setLoader(bedrock, loadChunkHack);
+    const ridgeNoise = (scale) => {
+        const octaves = new Array(4).fill(null).map(perlin2D);
+        return (x, z) => {
+            let result = 0, a = 1, s = scale;
+            for (const octave of octaves) {
+                result += (1 - Math.abs(octave(x * s, z * s))) * a;
+                a /= 2;
+                s *= 2;
+            }
+            return result;
+        };
+    };
+    const noiseA = ridgeNoise(0.005);
+    const noiseB = ridgeNoise(0.005);
+    const loadChunkRidge = (x, z, column) => {
+        const scale = 0.005;
+        const target = (1 + 0.4 * (noiseA(x, z) - noiseB(x, z))) * S;
+        column.push(dirt, Math.min(target, S - 1));
+        column.push(sand, Math.min(target, S));
+        column.push(grass, target);
+    };
+    //env.world.setLoader(bedrock, loadChunkRidge);
     env.refresh();
 };
 window.onload = main;

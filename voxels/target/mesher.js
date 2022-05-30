@@ -1,4 +1,4 @@
-import { Vec3 } from './base.js';
+import { assert, Vec3 } from './base.js';
 import { Geometry } from './renderer.js';
 const kNoMaterial = 0;
 const kEmptyBlock = 0;
@@ -43,6 +43,8 @@ class TerrainMesher {
     }
     meshFrontier(heightmap, mask, px, pz, sx, sz, scale, old, solid) {
         const geo = old ? old.getGeometry() : kCachedGeometryA;
+        if (old)
+            geo.dirty = true;
         if (!old)
             geo.clear();
         const { MaskOffset, PositionsOffset, Stride } = Geometry;
@@ -148,6 +150,10 @@ class TerrainMesher {
                         const material = this.getMaterialData(id);
                         const geo = material.color[3] < 1 ? water_geo : solid_geo;
                         this.addQuad(geo, material, d, u, v, w, h, mask, kTmpPos);
+                        if (material.texture && material.texture.alphaTest) {
+                            const alt = (-1 * (mask & ~0xff)) | (mask & 0xff);
+                            this.addQuad(geo, material, d, u, v, w, h, alt, kTmpPos);
+                        }
                         nw = n;
                         for (let wx = 0; wx < w; wx++, nw += lv) {
                             for (let hx = 0; hx < h; hx++) {
@@ -292,8 +298,9 @@ class TerrainMesher {
         vertices[positions_offset + Stride * 3 + v] += h;
         let textureIndex = material.textureIndex;
         if (textureIndex === 0 && material.texture) {
-            textureIndex = this.renderer.atlas.addImage(material.texture);
+            textureIndex = this.renderer.atlas.addTexture(material.texture);
             material.textureIndex = textureIndex;
+            assert(textureIndex !== 0);
         }
         const color = material.color;
         for (let i = 0; i < 4; i++) {

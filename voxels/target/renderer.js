@@ -178,13 +178,13 @@ class Shader {
     }
 }
 ;
-//////////////////////////////////////////////////////////////////////////////
+;
 class TextureAtlas {
     constructor(gl) {
         this.gl = gl;
         this.texture = nonnull(gl.createTexture());
         this.canvas = null;
-        this.urls = new Map();
+        this.images = new Map();
         this.data = new Uint8Array();
         this.nextResult = 0;
         this.bind();
@@ -192,23 +192,34 @@ class TextureAtlas {
         gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
     }
-    addImage(url) {
-        const existing = this.urls.get(url);
-        if (existing !== undefined)
-            return existing;
-        const result = ++this.nextResult;
-        this.urls.set(url, result);
-        const image = new Image();
-        image.addEventListener('load', () => this.loaded(result, image));
-        image.src = url;
-        return result;
+    addTexture(texture) {
+        const index = ++this.nextResult;
+        const image = this.image(texture.url);
+        if (image.complete) {
+            this.loaded(texture, index, image);
+        }
+        else {
+            image.addEventListener('load', () => this.loaded(texture, index, image));
+        }
+        return index;
     }
     bind() {
         this.gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
     }
-    loaded(index, image) {
+    image(url) {
+        const existing = this.images.get(url);
+        if (existing)
+            return existing;
+        const image = new Image();
+        this.images.set(url, image);
+        image.src = url;
+        return image;
+    }
+    loaded(texture, index, image) {
+        assert(image.complete);
+        const { x, y, w, h } = texture;
         if (this.canvas === null) {
-            const size = image.width;
+            const size = Math.floor(image.width / texture.w);
             const element = document.createElement('canvas');
             element.width = element.height = size;
             const canvas = nonnull(element.getContext('2d'));
@@ -216,12 +227,13 @@ class TextureAtlas {
         }
         const canvas = this.canvas;
         const size = canvas.canvas.width;
-        if (size !== image.width || size !== image.height) {
-            const { width, height, src } = image;
-            throw new Error(`Mismatch: ${size} vs. ${src}: (${width} x ${height})`);
+        if (image.width !== size * w || image.height !== size * h) {
+            throw new Error(`${image.src} should be ${size * w} x ${size * h} ` +
+                `(${w} x ${h} cells, each ${size} x ${size}) ` +
+                `but it was ${image.width} x ${image.height} instead.`);
         }
         canvas.clearRect(0, 0, size, size);
-        canvas.drawImage(image, 0, 0);
+        canvas.drawImage(image, size * x, size * y, size, size, 0, 0, size, size);
         const length = size * size * 4;
         const offset = length * index;
         const pixels = canvas.getImageData(0, 0, size, size).data;
@@ -237,9 +249,30 @@ class TextureAtlas {
                 data[i] = this.data[i];
             this.data = data;
         }
+        // When we create mip-maps, we'll read the RGB channels of transparent
+        // pixels, which are usually set to all 0s. Doing so averages in black
+        // values for these pixels. Instead, compute a mean color and use that.
+        let r = 0, g = 0, b = 0, n = 0;
+        for (let i = 0; i < length; i += 4) {
+            if (pixels[i + 3] === 0)
+                continue;
+            r += pixels[i + 0];
+            g += pixels[i + 1];
+            b += pixels[i + 2];
+            n++;
+        }
+        if (n > 0) {
+            r = (r / n) & 0xff;
+            g = (g / n) & 0xff;
+            b = (b / n) & 0xff;
+        }
         const data = this.data;
-        for (let i = 0; i < length; i++) {
-            data[i + offset] = pixels[i];
+        for (let i = 0; i < length; i += 4) {
+            const transparent = pixels[i + 3] === 0;
+            data[i + offset + 0] = transparent ? r : pixels[i + 0];
+            data[i + offset + 1] = transparent ? g : pixels[i + 1];
+            data[i + offset + 2] = transparent ? b : pixels[i + 2];
+            data[i + offset + 3] = pixels[i + 3];
         }
         this.bind();
         const gl = this.gl;
@@ -389,6 +422,7 @@ const kBasicShader = `
   precision highp float;
   precision highp sampler2DArray;
 
+  uniform int u_alphaTest;
   uniform vec3 u_fogColor;
   uniform float u_fogDepth;
   uniform sampler2DArray u_texture;
@@ -402,7 +436,10 @@ const kBasicShader = `
     vec3 index = v_uvw + vec3(v_move, v_move, 0);
     vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
-    if (o_color[3] < 0.25) discard;
+    if (u_alphaTest != 0) {
+      if (o_color[3] < 0.5) discard;
+      o_color[3] = 1.0;
+    }
   }
 `;
 class BasicShader extends Shader {
@@ -412,6 +449,7 @@ class BasicShader extends Shader {
         this.u_move = this.getUniformLocation('u_move');
         this.u_wave = this.getUniformLocation('u_wave');
         this.u_transform = this.getUniformLocation('u_transform');
+        this.u_alphaTest = this.getUniformLocation('u_alphaTest');
         this.u_fogColor = this.getUniformLocation('u_fogColor');
         this.u_fogDepth = this.getUniformLocation('u_fogDepth');
         this.a_position = this.getAttribLocation('a_position');
@@ -668,6 +706,7 @@ class Renderer {
         const fog_depth = this.overlay.getFogDepth();
         gl.uniform1f(this.shader.u_move, move);
         gl.uniform1f(this.shader.u_wave, wave);
+        gl.uniform1i(this.shader.u_alphaTest, 1);
         gl.uniform3fv(this.shader.u_fogColor, fog_color);
         gl.uniform1f(this.shader.u_fogDepth, fog_depth);
         let drawn = 0;
@@ -677,14 +716,15 @@ class Renderer {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
-        gl.disable(gl.CULL_FACE);
         gl.depthMask(false);
+        gl.disable(gl.CULL_FACE);
+        gl.uniform1i(this.shader.u_alphaTest, 0);
         for (const mesh of this.water_meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
-        gl.depthMask(true);
         gl.enable(gl.CULL_FACE);
+        gl.depthMask(true);
         this.overlay.draw();
         const total = this.solid_meshes.length + this.water_meshes.length;
         return `Draw calls: ${drawn} / ${total}`;
