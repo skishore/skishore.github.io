@@ -59,10 +59,11 @@ const applyFriction = (axis, state, dv) => {
 const tryAutoStepping = (dt, state, min, max, check) => {
     if (state.resting[1] > 0 && !state.inFluid)
         return;
+    const threshold = 4;
     const speed_x = Math.abs(state.vel[0]);
     const speed_z = Math.abs(state.vel[2]);
-    const step_x = (state.resting[0] !== 0 && speed_x > speed_z);
-    const step_z = (state.resting[2] !== 0 && speed_z > speed_x);
+    const step_x = (state.resting[0] !== 0 && threshold * speed_x > speed_z);
+    const step_z = (state.resting[2] !== 0 && threshold * speed_z > speed_x);
     if (!step_x && !step_z)
         return;
     const height = 1 - min[1] + Math.floor(min[1]);
@@ -257,7 +258,7 @@ const Movement = (env) => ({
         runningFriction: 0,
         standingFriction: 2,
         airMoveMultiplier: 0.5,
-        airJumps: 9999,
+        airJumps: 0,
         jumpTime: 0.2,
         jumpForce: 15,
         jumpImpulse: 10,
@@ -371,7 +372,7 @@ const main = () => {
     };
     const registry = env.registry;
     registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.4], true);
-    registry.addMaterialOfTexture('water', texture(13, 13), [1, 1, 1, 0.8], true);
+    registry.addMaterialOfTexture('water', texture(13, 12), [1, 1, 1, 0.8], true);
     registry.addMaterialOfTexture('leaves', texture(4, 3, true));
     const textures = [
         ['bedrock', 1, 1],
@@ -398,7 +399,7 @@ const main = () => {
     const leaves = registry.addBlock(['leaves'], true);
     const H = kWorldHeight;
     const S = Math.floor(kWorldHeight / 2);
-    const tiles = [[dirt, S - 2], [sand, S], [grass, S + 30], [dirt, S + 36], [snow, H]];
+    const tiles = [[dirt, S - 2], [sand, S], [grass, S + 4], [dirt, S + 36], [snow, H]];
     const trees = perlin2D();
     const valleys = perlin2D();
     const roughness = perlin2D();
@@ -517,6 +518,58 @@ const main = () => {
         column.push(grass, target);
     };
     //env.world.setLoader(bedrock, loadChunkRidge);
+    const kIslandRadius = 1024;
+    const biomes = [bedrock, dirt, grass, rock, sand, snow, trunk, water]
+        .map(x => [x, fractalPerlin2D(1, 16, 1, 4)]);
+    const loadChunkBiome = (x, z, column) => {
+        const base = Math.sqrt(x * x + z * z) / kIslandRadius;
+        if (base > 1)
+            return column.push(water, S);
+        let best_tile = bedrock;
+        let best_value = Number.NEGATIVE_INFINITY;
+        for (const [tile, noise] of biomes) {
+            const bonus = (tile === water ? 16 * (base - 0.5) : 0);
+            const value = noise(x, z) + bonus;
+            if (value < best_value)
+                continue;
+            best_tile = tile;
+            best_value = value;
+        }
+        column.push(best_tile, S);
+    };
+    //env.world.setLoader(bedrock, loadChunkBiome);
+    const minetest_noise_2d = (offset, scale, spread, octaves, persistence, lacunarity) => {
+        const components = new Array(octaves).fill(null).map(perlin2D);
+        return (x, y) => {
+            let f = 1, g = 1;
+            let result = 0;
+            x /= spread;
+            y /= spread;
+            for (let i = 0; i < octaves; i++) {
+                result += g * components[i](x * f, y * f);
+                f *= lacunarity;
+                g *= persistence;
+            }
+            return scale * result + offset;
+        };
+    };
+    //const mgv7_np_terrain_persist = minetest_noise_2d(
+    //    0.6, 0.1, 2000, 3, 0.6, 2.0);
+    const mgv7_np_height_select = minetest_noise_2d(0, 1, 512, 6, 0.7, 2.0);
+    const mgv7_np_terrain_base = minetest_noise_2d(4, 70, 512, 6, 0.6, 2.0);
+    const mgv7_np_terrain_alt = minetest_noise_2d(4, 25, 512, 6, 0.6, 2.0);
+    const loadChunkMinetest = (x, z, column) => {
+        const select = mgv7_np_height_select(x, z);
+        const factor = Math.max(Math.min(16 * Math.abs(select) - 4, 1), 0);
+        const height_base = mgv7_np_terrain_base(x, z);
+        const height_alt = mgv7_np_terrain_alt(x, z);
+        const height = height_base > height_alt
+            ? height_base * factor + height_alt * (1 - factor)
+            : height_alt;
+        const tile = factor > 0 && height_base > height_alt ? dirt : grass;
+        column.push(tile, height | 0);
+    };
+    //env.world.setLoader(bedrock, loadChunkMinetest);
     env.refresh();
 };
 window.onload = main;

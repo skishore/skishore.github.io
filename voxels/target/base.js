@@ -272,9 +272,9 @@ const Mat4 = {
 };
 class Tensor3 {
     constructor(x, y, z) {
-        this.data = new Uint32Array(x * y * z);
+        this.data = new Int16Array(x * y * z);
         this.shape = [x, y, z];
-        this.stride = [1, x * z, x];
+        this.stride = [y, 1, x * y];
     }
     get(x, y, z) {
         return this.data[this.index(x, y, z)];

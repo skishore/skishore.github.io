@@ -245,9 +245,7 @@ class Column {
             const offset = 2 * i;
             const block = this.data[offset + 0];
             const level = this.data[offset + 1];
-            for (let y = last; y < level; y++) {
-                chunk.setBlock(x, y, z, block);
-            }
+            chunk.setColumn(x, z, last, level - last, block);
             last = level;
         }
     }
@@ -285,8 +283,8 @@ const kNumChunksToLoadPerFrame = 1;
 const kNumChunksToMeshPerFrame = 1;
 const kNumLODChunksToMeshPerFrame = 1;
 const kFrontierLOD = 2;
-const kFrontierRadius = 4;
-const kFrontierLevels = 8;
+const kFrontierRadius = 8;
+const kFrontierLevels = 6;
 const kNeighborOffsets = (() => {
     const W = kChunkWidth;
     const H = kWorldHeight;
@@ -403,6 +401,16 @@ class Chunk {
         if (zm === kChunkMask)
             neighbor(0, 0, 1);
     }
+    setColumn(x, z, start, count, block) {
+        const voxels = this.voxels;
+        if (!voxels)
+            throw new Error(`setColumn called pre-load`);
+        ;
+        assert(voxels.stride[1] === 1);
+        assert(!this.finished);
+        const sindex = voxels.index(x & kChunkMask, start, z & kChunkMask);
+        voxels.data.fill(block, sindex, sindex + count);
+    }
     hasMesh() {
         return !!(this.solid || this.water);
     }
@@ -446,16 +454,13 @@ class Chunk {
         const [ni, nj, nk] = size;
         const [di, dj, dk] = dstPos;
         const [si, sj, sk] = srcPos;
-        const dsj = dst.stride[1];
-        const ssj = src.stride[1];
+        assert(dst.stride[1] === 1);
+        assert(src.stride[1] === 1);
         for (let i = 0; i < ni; i++) {
             for (let k = 0; k < nk; k++) {
-                // Unroll along the y-axis, since it's the longest chunk dimension.
-                let sindex = src.index(si + i, sj, sk + k);
-                let dindex = dst.index(di + i, dj, dk + k);
-                for (let j = 0; j < nj; j++, dindex += dsj, sindex += ssj) {
-                    dst.data[dindex] = src.data[sindex];
-                }
+                const sindex = src.index(si + i, sj, sk + k);
+                const dindex = dst.index(di + i, dj, dk + k);
+                dst.data.set(src.data.subarray(sindex, sindex + nj), dindex);
             }
         }
     }
@@ -505,17 +510,24 @@ class Counters {
     }
 }
 ;
+const kMultiMeshBits = 2;
+const kMultiMeshSide = 1 << kMultiMeshBits;
+const kMultiMeshArea = kMultiMeshSide * kMultiMeshSide;
+const kLODSingleMask = (1 << 4) - 1;
 class LODMultiMesh {
     constructor() {
+        this.visible = 0;
         this.solid = null;
         this.water = null;
-        this.mask = 0;
-        this.meshed = new Array(4).fill(false);
-        this.enabled = new Array(4).fill(false);
+        this.meshed = new Array(kMultiMeshArea).fill(false);
+        this.enabled = new Array(kMultiMeshArea).fill(false);
+        this.mask = new Int32Array(2);
+        this.mask[0] = this.mask[1] = -1;
     }
     disable(index) {
         if (!this.enabled[index])
             return;
+        this.setMask(index, kLODSingleMask);
         this.enabled[index] = false;
         if (this.enabled.some(x => x))
             return;
@@ -527,22 +539,27 @@ class LODMultiMesh {
             this.water.dispose();
         this.solid = null;
         this.water = null;
+        this.mask[0] = this.mask[1] = -1;
     }
     index(chunk) {
-        return ((chunk.cz & 1) << 1) | (chunk.cx & 1);
+        const mask = kMultiMeshSide - 1;
+        return ((chunk.cz & mask) << kMultiMeshBits) | (chunk.cx & mask);
     }
     show(index, mask) {
         assert(this.meshed[index]);
-        const local = (1 << 4) - 1;
-        const full = (1 << 16) - 1;
-        this.mask &= ~(local << (index * 4));
-        this.mask |= mask << (index * 4);
-        const shown = this.mask !== full;
+        this.setMask(index, mask);
+        this.enabled[index] = true;
+    }
+    setMask(index, mask) {
+        const mask_index = index >> 3;
+        const mask_shift = (index & 7) * 4;
+        this.mask[mask_index] &= ~(kLODSingleMask << mask_shift);
+        this.mask[mask_index] |= mask << mask_shift;
+        const shown = (this.mask[0] & this.mask[1]) !== -1;
         if (this.solid)
             this.solid.show(this.mask, shown);
         if (this.water)
             this.water.show(this.mask, shown);
-        this.enabled[index] = true;
     }
 }
 ;
@@ -678,6 +695,10 @@ class Frontier {
         const lod = kFrontierLOD << level;
         const x = (2 * cx + 1) << lshift;
         const z = (2 * cz + 1) << lshift;
+        // The (x, z) position of the center of the multimesh for this mesh.
+        const multi = kMultiMeshSide;
+        const mx = (2 * (cx & ~(multi - 1)) + multi) << lshift;
+        const mz = (2 * (cz & ~(multi - 1)) + multi) << lshift;
         for (let k = 0; k < 4; k++) {
             const dx = (k & 1 ? 0 : -1 << lshift);
             const dz = (k & 2 ? 0 : -1 << lshift);
@@ -713,18 +734,16 @@ class Frontier {
                 }
             }
             const n = side + 2;
-            const px = dx - lod - ((cx & 1 ? 1 : 3) << lshift);
-            const pz = dz - lod - ((cz & 1 ? 1 : 3) << lshift);
-            const mask = (1 << (k + 4 * mesh.index(chunk)));
+            const px = x + dx - mx - lod;
+            const pz = z + dz - mz - lod;
+            const mask = k + 4 * mesh.index(chunk);
             mesh.solid = this.world.mesher.meshFrontier(solid_heightmap, mask, px, pz, n, n, lod, mesh.solid, true);
             mesh.water = this.world.mesher.meshFrontier(water_heightmap, mask, px, pz, n, n, lod, mesh.water, false);
         }
-        const px = x + ((cx & 1 ? 1 : 3) << lshift);
-        const pz = z + ((cz & 1 ? 1 : 3) << lshift);
         if (mesh.solid)
-            mesh.solid.setPosition(px, 0, pz);
+            mesh.solid.setPosition(mx, 0, mz);
         if (mesh.water)
-            mesh.water.setPosition(px, 0, pz);
+            mesh.water.setPosition(mx, 0, mz);
         mesh.meshed[mesh.index(chunk)] = true;
     }
     disableFarawayMeshes() {
@@ -742,7 +761,8 @@ class Frontier {
         const result = this.chunks.get(key);
         if (result)
             return result;
-        const mesh = this.getMultiMesh(cx >> 1, cz >> 1, level + 1);
+        const bits = kMultiMeshBits;
+        const mesh = this.getMultiMesh(cx >> bits, cz >> bits, level);
         const created = { cx, cz, level, mesh };
         this.chunks.set(key, created);
         return created;
@@ -817,6 +837,7 @@ class World {
         const buffer = this.buffer;
         for (let x = 0; x < buffer.shape[0]; x++) {
             for (let z = 0; z < buffer.shape[2]; z++) {
+                buffer.set(x, 0, z, bedrock);
                 buffer.set(x, 1, z, bedrock);
             }
         }
@@ -904,6 +925,7 @@ class Env {
         this.cameraAlpha = 0;
         this.cameraBlock = kEmptyBlock;
         this.cameraColor = kWhite;
+        this.shouldMesh = true;
         this.frame = 0;
         this.container = new Container(id);
         this.entities = new EntityComponentSystem();
@@ -936,6 +958,7 @@ class Env {
         this.entities.render(dt);
         this.updateOverlayColor(wave);
         const renderer_stats = this.renderer.render(move, wave);
+        this.shouldMesh = true;
         const timing = this.timing;
         if (timing.updatePerf.frame() % 10 !== 0)
             return;
@@ -948,6 +971,9 @@ class Env {
         if (!this.container.inputs.pointer)
             return;
         this.entities.update(dt);
+        if (!this.shouldMesh)
+            return;
+        this.shouldMesh = false;
         this.world.remesh();
     }
     formatStat(perf) {

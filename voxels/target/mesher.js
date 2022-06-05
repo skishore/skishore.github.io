@@ -6,15 +6,28 @@ const kSentinel = 1 << 30;
 ;
 ;
 //////////////////////////////////////////////////////////////////////////////
+const pack_indices = (xs) => {
+    assert(xs.length === 6);
+    let result = 0;
+    for (let i = 0; i < xs.length; i++) {
+        const x = xs[i];
+        assert(x === (x | 0));
+        assert(0 <= x && x < 4);
+        result |= x << (i * 2);
+    }
+    return result;
+};
+//////////////////////////////////////////////////////////////////////////////
 const kCachedGeometryA = Geometry.empty();
 const kCachedGeometryB = Geometry.empty();
 const kTmpPos = Vec3.create();
-let kMaskData = new Int16Array();
+let kMaskData = new Int32Array();
+let kMaskUnion = new Int32Array();
 const kIndexOffsets = {
-    A: [0, 1, 2, 0, 2, 3],
-    B: [1, 2, 3, 0, 1, 3],
-    C: [0, 2, 1, 0, 3, 2],
-    D: [3, 1, 0, 3, 2, 1],
+    A: pack_indices([0, 1, 2, 0, 2, 3]),
+    B: pack_indices([1, 2, 3, 0, 1, 3]),
+    C: pack_indices([0, 2, 1, 0, 3, 2]),
+    D: pack_indices([3, 1, 0, 3, 2, 1]),
 };
 const kHeightmapSides = [
     [0, 1, 2, 1, 0, 0x82],
@@ -47,19 +60,19 @@ class TerrainMesher {
             geo.dirty = true;
         if (!old)
             geo.clear();
-        const { MaskOffset, PositionsOffset, Stride } = Geometry;
-        const source = Stride * geo.num_vertices;
+        const { OffsetPos, OffsetMask, Stride } = Geometry;
+        const source = Stride * geo.num_quads;
         this.computeFrontierGeometry(geo, heightmap, sx, sz, scale, solid);
-        const target = Stride * geo.num_vertices;
+        const target = Stride * geo.num_quads;
         for (let offset = source; offset < target; offset += Stride) {
-            geo.vertices[offset + PositionsOffset + 0] += px;
-            geo.vertices[offset + PositionsOffset + 2] += pz;
-            geo.vertices[offset + MaskOffset] = mask;
+            geo.quads[offset + OffsetPos + 0] += px;
+            geo.quads[offset + OffsetPos + 2] += pz;
+            geo.quads[offset + OffsetMask] = mask;
         }
         return this.buildMesh(geo, old, solid);
     }
     buildMesh(geo, old, solid) {
-        if (geo.num_indices === 0) {
+        if (geo.num_quads === 0) {
             if (old)
                 old.dispose();
             return null;
@@ -82,11 +95,16 @@ class TerrainMesher {
             Vec3.set(kTmpPos, 0, 0, 0);
             const area = lu * lv;
             if (kMaskData.length < area) {
-                kMaskData = new Int16Array(area);
+                kMaskData = new Int32Array(area);
+            }
+            if (kMaskUnion.length < lu) {
+                kMaskUnion = new Int32Array(lu);
             }
             for (let id = 0; id < ld; id++) {
                 let n = 0;
+                let complete_union = 0;
                 for (let iu = 0; iu < lu; iu++) {
+                    kMaskUnion[iu] = 0;
                     let index = base + id * sd + iu * su;
                     for (let iv = 0; iv < lv; iv++, index += sv, n += 1) {
                         // mask[n] is the face between (id, iu, iv) and (id + 1, iu, iv).
@@ -102,15 +120,20 @@ class TerrainMesher {
                         const facing = this.getFaceDir(block0, block1, dir);
                         if (facing === 0)
                             continue;
-                        const mask = facing > 0
+                        const material = facing > 0
                             ? this.getBlockFaceMaterial(block0, dir)
                             : -this.getBlockFaceMaterial(block1, dir + 1);
                         const ao = facing > 0
                             ? this.packAOMask(data, index + sd, index, su, sv)
                             : this.packAOMask(data, index, index + sd, su, sv);
-                        kMaskData[n] = (mask << 8) | ao;
+                        const mask = (material << 8) | ao;
+                        kMaskData[n] = mask;
+                        kMaskUnion[iu] |= mask;
+                        complete_union |= mask;
                     }
                 }
+                if (complete_union === 0)
+                    continue;
                 if (id === 0) {
                     for (let i = 0; i < area; i++) {
                         if (kMaskData[i] > 0)
@@ -126,6 +149,10 @@ class TerrainMesher {
                 n = 0;
                 kTmpPos[d] = id;
                 for (let iu = 0; iu < lu; iu++) {
+                    if (kMaskUnion[iu] === 0) {
+                        n += lv;
+                        continue;
+                    }
                     let h = 1;
                     for (let iv = 0; iv < lv; iv += h, n += h) {
                         const mask = kMaskData[n];
@@ -260,78 +287,41 @@ class TerrainMesher {
         }
     }
     addQuad(geo, material, d, u, v, w, h, mask, pos) {
-        const { num_indices, num_vertices } = geo;
-        geo.allocateVertices(num_vertices + 4);
-        geo.allocateIndices(num_indices + 6);
-        const dir = Math.sign(mask);
-        const { indices, vertices } = geo;
-        const triangleHint = this.getTriangleHint(mask);
-        const offsets = mask > 0
-            ? (triangleHint ? kIndexOffsets.C : kIndexOffsets.D)
-            : (triangleHint ? kIndexOffsets.A : kIndexOffsets.B);
-        for (let i = 0; i < 6; i++) {
-            indices[num_indices + i] = num_vertices + offsets[i];
-        }
+        const { num_quads } = geo;
+        geo.allocateQuads(num_quads + 1);
+        const { quads } = geo;
         const Stride = Geometry.Stride;
-        const base = Stride * num_vertices;
-        const positions_offset = base + Geometry.PositionsOffset;
-        const normals_offset = base + Geometry.NormalsOffset;
-        const colors_offset = base + Geometry.ColorsOffset;
-        const uvws_offset = base + Geometry.UVWsOffset;
-        const wave_offset = base + Geometry.WaveOffset;
-        const mask_offset = base + Geometry.MaskOffset;
-        for (let i = 0; i < 3; i++) {
-            const p = pos[i];
-            vertices[positions_offset + Stride * 0 + i] = p;
-            vertices[positions_offset + Stride * 1 + i] = p;
-            vertices[positions_offset + Stride * 2 + i] = p;
-            vertices[positions_offset + Stride * 3 + i] = p;
-            const x = i === d ? dir : 0;
-            vertices[normals_offset + Stride * 0 + i] = x;
-            vertices[normals_offset + Stride * 1 + i] = x;
-            vertices[normals_offset + Stride * 2 + i] = x;
-            vertices[normals_offset + Stride * 3 + i] = x;
-        }
-        vertices[positions_offset + Stride * 1 + u] += w;
-        vertices[positions_offset + Stride * 2 + u] += w;
-        vertices[positions_offset + Stride * 2 + v] += h;
-        vertices[positions_offset + Stride * 3 + v] += h;
+        const base = Stride * num_quads;
+        const offset_pos = base + Geometry.OffsetPos;
+        quads[offset_pos + 0] = pos[0];
+        quads[offset_pos + 1] = pos[1];
+        quads[offset_pos + 2] = pos[2];
+        const offset_size = base + Geometry.OffsetSize;
+        quads[offset_size + 0] = w;
+        quads[offset_size + 1] = h;
+        const color = material.color;
+        const offset_color = base + Geometry.OffsetColor;
+        quads[offset_color + 0] = color[0];
+        quads[offset_color + 1] = color[1];
+        quads[offset_color + 2] = color[2];
+        quads[offset_color + 3] = color[3];
         let textureIndex = material.textureIndex;
         if (textureIndex === 0 && material.texture) {
             textureIndex = this.renderer.atlas.addTexture(material.texture);
             material.textureIndex = textureIndex;
             assert(textureIndex !== 0);
         }
-        const color = material.color;
-        for (let i = 0; i < 4; i++) {
-            const ao = 1 - 0.3 * (mask >> (2 * i) & 3);
-            vertices[colors_offset + Stride * i + 0] = color[0] * ao;
-            vertices[colors_offset + Stride * i + 1] = color[1] * ao;
-            vertices[colors_offset + Stride * i + 2] = color[2] * ao;
-            vertices[colors_offset + Stride * i + 3] = color[3];
-        }
-        const wave = material.liquid ? 1 : 0;
-        for (let i = 0; i < 4; i++) {
-            vertices[uvws_offset + Stride * i + 0] = 0;
-            vertices[uvws_offset + Stride * i + 1] = 0;
-            vertices[uvws_offset + Stride * i + 2] = textureIndex;
-            vertices[wave_offset + Stride * i] = wave;
-            vertices[mask_offset + Stride * i] = 0;
-        }
-        if (d === 2) {
-            const wd = -dir * w;
-            vertices[uvws_offset + Stride * 0 + 1] = h;
-            vertices[uvws_offset + Stride * 1 + 1] = h;
-            vertices[uvws_offset + Stride * 1 + 0] = wd;
-            vertices[uvws_offset + Stride * 2 + 0] = wd;
-        }
-        else {
-            const hd = dir * h;
-            vertices[uvws_offset + Stride * 0 + 1] = w;
-            vertices[uvws_offset + Stride * 3 + 1] = w;
-            vertices[uvws_offset + Stride * 2 + 0] = hd;
-            vertices[uvws_offset + Stride * 3 + 0] = hd;
-        }
+        const triangleHint = this.getTriangleHint(mask);
+        const indices = mask > 0
+            ? (triangleHint ? kIndexOffsets.C : kIndexOffsets.D)
+            : (triangleHint ? kIndexOffsets.A : kIndexOffsets.B);
+        quads[base + Geometry.OffsetAOs] = mask & 0xff;
+        quads[base + Geometry.OffsetDim] = d;
+        quads[base + Geometry.OffsetDir] = Math.sign(mask);
+        quads[base + Geometry.OffsetMask] = 0;
+        quads[base + Geometry.OffsetWave] = material.liquid ? 1 : 0;
+        quads[base + Geometry.OffsetTexture] = material.textureIndex;
+        quads[base + Geometry.OffsetIndices] = indices;
     }
     getFaceDir(block0, block1, dir) {
         const opaque0 = this.opaque[block0];

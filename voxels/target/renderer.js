@@ -28,6 +28,7 @@ class Camera {
         const jerkx = Math.abs(dx) > 400 && Math.abs(dx / (this.last_dx || 1)) > 4;
         const jerky = Math.abs(dy) > 400 && Math.abs(dy / (this.last_dy || 1)) > 4;
         if (jerkx || jerky) {
+            console.log(`Smoothing out update: ${dx} x ${dy}`);
             const saved_x = this.last_dx;
             const saved_y = this.last_dy;
             this.last_dx = (dx + this.last_dx) / 2;
@@ -105,7 +106,6 @@ class Camera {
 ;
 //////////////////////////////////////////////////////////////////////////////
 const ARRAY_BUFFER = WebGL2RenderingContext.ARRAY_BUFFER;
-const ELEMENT_ARRAY_BUFFER = WebGL2RenderingContext.ELEMENT_ARRAY_BUFFER;
 const TEXTURE_2D_ARRAY = WebGL2RenderingContext.TEXTURE_2D_ARRAY;
 ;
 ;
@@ -290,11 +290,9 @@ class TextureAtlas {
 ;
 //////////////////////////////////////////////////////////////////////////////
 class Geometry {
-    constructor(indices, vertices, num_indices, num_vertices) {
-        this.indices = indices;
-        this.vertices = vertices;
-        this.num_indices = num_indices;
-        this.num_vertices = num_vertices;
+    constructor(quads, num_quads) {
+        this.quads = quads;
+        this.num_quads = num_quads;
         this.lower_bound = Vec3.create();
         this.upper_bound = Vec3.create();
         this.bounds = Array(8).fill(null);
@@ -303,31 +301,18 @@ class Geometry {
         this.dirty = true;
     }
     clear() {
-        this.num_indices = 0;
-        this.num_vertices = 0;
+        this.num_quads = 0;
         this.dirty = true;
     }
-    allocateIndices(n) {
-        this.num_indices = n;
-        const needed = n;
-        const length = this.indices.length;
-        if (length >= needed)
-            return;
-        const expanded = new Uint32Array(Math.max(length * 2, needed));
-        for (let i = 0; i < length; i++)
-            expanded[i] = this.indices[i];
-        this.indices = expanded;
-    }
-    allocateVertices(n) {
-        this.num_vertices = n;
-        const needed = n * Geometry.Stride;
-        const length = this.vertices.length;
+    allocateQuads(n) {
+        this.num_quads = n;
+        const length = this.quads.length;
+        const needed = Geometry.Stride * n;
         if (length >= needed)
             return;
         const expanded = new Float32Array(Math.max(length * 2, needed));
-        for (let i = 0; i < length; i++)
-            expanded[i] = this.vertices[i];
-        this.vertices = expanded;
+        expanded.set(this.quads);
+        this.quads = expanded;
     }
     cull(delta, planes) {
         if (this.dirty)
@@ -348,24 +333,34 @@ class Geometry {
         const { lower_bound, upper_bound } = this;
         Vec3.set(lower_bound, Infinity, Infinity, Infinity);
         Vec3.set(upper_bound, -Infinity, -Infinity, -Infinity);
+        const quads = this.quads;
         const stride = Geometry.Stride;
-        const vertices = this.vertices;
-        const start = Geometry.PositionsOffset;
-        const limit = start + this.num_vertices * stride;
-        for (let i = start; i < limit; i += stride) {
-            const x = vertices[i + 0], y = vertices[i + 1], z = vertices[i + 2];
-            if (lower_bound[0] > x)
-                lower_bound[0] = x;
-            if (lower_bound[1] > y)
-                lower_bound[1] = y;
-            if (lower_bound[2] > z)
-                lower_bound[2] = z;
-            if (upper_bound[0] < x)
-                upper_bound[0] = x;
-            if (upper_bound[1] < y)
-                upper_bound[1] = y;
-            if (upper_bound[2] < z)
-                upper_bound[2] = z;
+        assert(Geometry.OffsetPos === 0);
+        assert(Geometry.OffsetSize === 3);
+        assert(Geometry.OffsetDim === 10);
+        assert(quads.length % stride === 0);
+        for (let i = 0; i < quads.length; i += stride) {
+            const lx = quads[i + 0];
+            const ly = quads[i + 1];
+            const lz = quads[i + 2];
+            const w = quads[i + 3];
+            const h = quads[i + 4];
+            const dim = quads[i + 10];
+            const mx = lx + (dim === 2 ? w : dim === 1 ? h : 0);
+            const my = ly + (dim === 0 ? w : dim === 2 ? h : 0);
+            const mz = lz + (dim === 1 ? w : dim === 0 ? h : 0);
+            if (lower_bound[0] > lx)
+                lower_bound[0] = lx;
+            if (lower_bound[1] > ly)
+                lower_bound[1] = ly;
+            if (lower_bound[2] > lz)
+                lower_bound[2] = lz;
+            if (upper_bound[0] < mx)
+                upper_bound[0] = mx;
+            if (upper_bound[1] < my)
+                upper_bound[1] = my;
+            if (upper_bound[2] < mz)
+                upper_bound[2] = mz;
         }
         lower_bound[1] -= 1; // because of the vertical "wave" shift
         for (let i = 0; i < 8; i++) {
@@ -377,46 +372,112 @@ class Geometry {
         this.dirty = false;
     }
     static clone(geo) {
-        const { num_indices, num_vertices } = geo;
-        const indices = geo.indices.slice(0, num_indices);
-        const vertices = geo.vertices.slice(0, num_vertices * Geometry.Stride);
-        return new Geometry(indices, vertices, num_indices, num_vertices);
+        const num_quads = geo.num_quads;
+        const quads = geo.quads.slice(0, num_quads * Geometry.Stride);
+        return new Geometry(quads, num_quads);
     }
     static empty() {
-        return new Geometry(new Uint32Array(), new Float32Array(), 0, 0);
+        return new Geometry(new Float32Array(), 0);
     }
 }
-Geometry.PositionsOffset = 0;
-Geometry.NormalsOffset = 3;
-Geometry.ColorsOffset = 6;
-Geometry.UVWsOffset = 10;
-Geometry.WaveOffset = 13;
-Geometry.MaskOffset = 14;
+// position: vec3
+Geometry.OffsetPos = 0;
+// size: vec2
+Geometry.OffsetSize = 3;
+// color: vec4
+Geometry.OffsetColor = 5;
+// ao: float -> int32; 4 packed 2-bit values
+Geometry.OffsetAOs = 9;
+// dim: float -> int32; {0, 1, 2}
+Geometry.OffsetDim = 10;
+// dir: float -> int32; {-1, 1}
+Geometry.OffsetDir = 11;
+// mask: float -> int32; small int
+Geometry.OffsetMask = 12;
+// wave: float -> int32; {0, 1}
+Geometry.OffsetWave = 13;
+// texture: float -> int32; medium int
+Geometry.OffsetTexture = 14;
+// indices: float -> int32; 6 packed 2-bit values
+Geometry.OffsetIndices = 15;
+// Overall stride (in floats)
 Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
 const kBasicShader = `
-  uniform int u_mask;
+  uniform ivec2 u_mask;
   uniform float u_move;
   uniform float u_wave;
   uniform mat4 u_transform;
-  in vec3 a_position;
+
+  in vec3 a_pos;
+  in vec2 a_size;
   in vec4 a_color;
-  in vec3 a_uvw;
-  in float a_wave;
+  in float a_aos;
+  in float a_dim;
+  in float a_dir;
   in float a_mask;
+  in float a_wave;
+  in float a_texture;
+  in float a_indices;
+
   out vec4 v_color;
   out vec3 v_uvw;
   out float v_move;
 
+  int unpackI2(float packed, int index) {
+    return (int(packed) >> (2 * index)) & 3;
+  }
+
   void main() {
-    v_color = a_color;
-    v_uvw = a_uvw;
+    int instance = gl_VertexID + 3 * (gl_InstanceID & 1);
+    int index = unpackI2(a_indices, instance);
+
+    float ao = 1.0 - 0.3 * float(unpackI2(a_aos, index));
+    v_color = vec4(ao * vec3(a_color), a_color[3]);
+
+    int dim = int(a_dim);
+    v_uvw = vec3(0, 0, a_texture);
+    if (dim == 2) {
+      if (index == 1 || index == 2) {
+        v_uvw[0] = -a_dir * a_size[0];
+      }
+      if (index == 0 || index == 1) {
+        v_uvw[1] = a_size[1];
+      }
+    } else {
+      if (index == 2 || index == 3) {
+        v_uvw[0] = a_dir * a_size[1];
+      }
+      if (index == 0 || index == 3) {
+        v_uvw[1] = a_size[0];
+      }
+    }
+
     v_move = a_wave * u_move;
-    float wave = a_wave * u_wave;
-    vec3 adjusted = a_position - vec3(0, wave, 0);
-    gl_Position = u_transform * vec4(adjusted, 1.0);
-    if ((u_mask & int(a_mask)) != 0) gl_Position[3] = 0.0;
+
+    const vec3 kShift[6] = vec3[6](
+      vec3(1, 0, 0),
+      vec3(0, 1, 0),
+      vec3(0, 0, 1),
+      vec3(1, 0, 0),
+      vec3(0, 1, 0),
+      vec3(0, 0, 1)
+    );
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+
+    vec3 pos = a_pos;
+    pos += w * a_size[0] * kShift[dim + 1];
+    pos += h * a_size[1] * kShift[dim + 2];
+    pos -= vec3(0, a_wave * u_wave, 0);
+    gl_Position = u_transform * vec4(pos, 1.0);
+
+    int mask = int(a_mask);
+    int mask_index = mask >> 5;
+    int mask_value = 1 << (mask & 31);
+    bool hide = (u_mask[mask_index] & mask_value) != 0;
+    if (hide) gl_Position[3] = 0.0;
   }
 #split
   precision highp float;
@@ -432,7 +493,8 @@ const kBasicShader = `
   out vec4 o_color;
 
   void main() {
-    float fog = clamp(exp2(-u_fogDepth * gl_FragCoord.w), 0.0, 1.0);
+    float depth = u_fogDepth * gl_FragCoord.w;
+    float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
     vec3 index = v_uvw + vec3(v_move, v_move, 0);
     vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
@@ -452,14 +514,20 @@ class BasicShader extends Shader {
         this.u_alphaTest = this.getUniformLocation('u_alphaTest');
         this.u_fogColor = this.getUniformLocation('u_fogColor');
         this.u_fogDepth = this.getUniformLocation('u_fogDepth');
-        this.a_position = this.getAttribLocation('a_position');
+        this.a_pos = this.getAttribLocation('a_pos');
+        this.a_size = this.getAttribLocation('a_size');
         this.a_color = this.getAttribLocation('a_color');
-        this.a_uvw = this.getAttribLocation('a_uvw');
-        this.a_wave = this.getAttribLocation('a_wave');
+        this.a_aos = this.getAttribLocation('a_aos');
+        this.a_dim = this.getAttribLocation('a_dim');
+        this.a_dir = this.getAttribLocation('a_dir');
         this.a_mask = this.getAttribLocation('a_mask');
+        this.a_wave = this.getAttribLocation('a_wave');
+        this.a_texture = this.getAttribLocation('a_texture');
+        this.a_indices = this.getAttribLocation('a_indices');
     }
 }
 ;
+const kDefaultMask = new Int32Array(2);
 class BasicMesh {
     constructor(gl, shader, geo, meshes, hidden_meshes) {
         const index = meshes.length;
@@ -470,12 +538,11 @@ class BasicMesh {
         this.meshes = meshes;
         this.hidden_meshes = hidden_meshes;
         this.vao = null;
-        this.indices = null;
-        this.vertices = null;
+        this.quads = null;
         this.position = Vec3.create();
         this.index = index;
         this.shown = true;
-        this.mask = 0;
+        this.mask = kDefaultMask;
     }
     draw(camera, planes) {
         const position = this.position;
@@ -485,16 +552,17 @@ class BasicMesh {
         this.prepareBuffers();
         const transform = camera.getTransformFor(position);
         const gl = this.gl;
+        const n = this.geo.num_quads;
         gl.bindVertexArray(this.vao);
-        gl.bindBuffer(ELEMENT_ARRAY_BUFFER, this.indices);
-        gl.uniform1i(this.shader.u_mask, this.mask);
+        gl.uniform2iv(this.shader.u_mask, this.mask);
         gl.uniformMatrix4fv(this.shader.u_transform, false, transform);
-        gl.drawElements(gl.TRIANGLES, this.geo.num_indices, gl.UNSIGNED_INT, 0);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, n * 2);
         return true;
     }
     dispose() {
         this.destroyBuffers();
         this.removeFromMeshes();
+        this.mask = kDefaultMask;
     }
     getGeometry() {
         return this.geo;
@@ -519,11 +587,9 @@ class BasicMesh {
     destroyBuffers() {
         const gl = this.gl;
         gl.deleteVertexArray(this.vao);
-        gl.deleteBuffer(this.indices);
-        gl.deleteBuffer(this.vertices);
+        gl.deleteBuffer(this.quads);
         this.vao = null;
-        this.indices = null;
-        this.vertices = null;
+        this.quads = null;
     }
     prepareBuffers() {
         if (this.vao)
@@ -531,16 +597,19 @@ class BasicMesh {
         const { gl, shader } = this;
         this.vao = nonnull(gl.createVertexArray());
         gl.bindVertexArray(this.vao);
-        const data = this.geo.vertices;
-        this.prepareIndices(this.geo.indices);
-        this.prepareVertices(this.geo.vertices);
-        this.prepareAttribute(shader.a_position, data, 3, Geometry.PositionsOffset);
-        this.prepareAttribute(shader.a_color, data, 4, Geometry.ColorsOffset);
-        this.prepareAttribute(shader.a_uvw, data, 3, Geometry.UVWsOffset);
-        this.prepareAttribute(shader.a_wave, data, 1, Geometry.WaveOffset);
-        this.prepareAttribute(shader.a_mask, data, 1, Geometry.MaskOffset);
+        this.prepareQuads(this.geo.quads);
+        this.prepareAttribute(shader.a_pos, 3, Geometry.OffsetPos);
+        this.prepareAttribute(shader.a_size, 2, Geometry.OffsetSize);
+        this.prepareAttribute(shader.a_color, 4, Geometry.OffsetColor);
+        this.prepareAttribute(shader.a_aos, 1, Geometry.OffsetAOs);
+        this.prepareAttribute(shader.a_dim, 1, Geometry.OffsetDim);
+        this.prepareAttribute(shader.a_dir, 1, Geometry.OffsetDir);
+        this.prepareAttribute(shader.a_mask, 1, Geometry.OffsetMask);
+        this.prepareAttribute(shader.a_wave, 1, Geometry.OffsetWave);
+        this.prepareAttribute(shader.a_texture, 1, Geometry.OffsetTexture);
+        this.prepareAttribute(shader.a_indices, 1, Geometry.OffsetIndices);
     }
-    prepareAttribute(location, data, size, offset_in_floats) {
+    prepareAttribute(location, size, offset_in_floats) {
         if (location === null)
             return;
         const gl = this.gl;
@@ -548,20 +617,14 @@ class BasicMesh {
         const stride = 4 * Geometry.Stride;
         gl.enableVertexAttribArray(location);
         gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+        gl.vertexAttribDivisor(location, 2);
     }
-    prepareIndices(data) {
-        const gl = this.gl;
-        const buffer = nonnull(gl.createBuffer());
-        gl.bindBuffer(ELEMENT_ARRAY_BUFFER, buffer);
-        gl.bufferData(ELEMENT_ARRAY_BUFFER, data, gl.STATIC_DRAW);
-        this.indices = buffer;
-    }
-    prepareVertices(data) {
+    prepareQuads(data) {
         const gl = this.gl;
         const buffer = nonnull(gl.createBuffer());
         gl.bindBuffer(ARRAY_BUFFER, buffer);
         gl.bufferData(ARRAY_BUFFER, data, gl.STATIC_DRAW);
-        this.vertices = buffer;
+        this.quads = buffer;
     }
     removeFromMeshes() {
         const meshes = this.shown ? this.meshes : this.hidden_meshes;
@@ -577,7 +640,8 @@ class BasicMesh {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-const kDefaultFogColor = [0.2, 0.5, 0.8];
+const kDefaultFogColor = [0.6, 0.8, 1.0];
+const kDefaultSkyColor = [0.6, 0.8, 1.0];
 const kScreenOverlayShader = `
   in vec3 a_position;
 
@@ -632,7 +696,7 @@ class ScreenOverlay {
         return this.fog_color;
     }
     getFogDepth() {
-        return this.color[3] === 1 ? 4096 : 16;
+        return this.color[3] === 1 ? 1024 : 16;
     }
     setColor(color) {
         for (let i = 0; i < 4; i++)
@@ -698,7 +762,8 @@ class Renderer {
     }
     render(move, wave) {
         const gl = this.gl;
-        gl.clearColor(0.8, 0.9, 1, 1);
+        const [r, g, b] = kDefaultSkyColor;
+        gl.clearColor(r, g, b, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
         this.atlas.bind();
         this.shader.bind();
