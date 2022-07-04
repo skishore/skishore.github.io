@@ -35,6 +35,12 @@ const kHeightmapSides = [
     [2, 0, 1, 0, 1, 0x06],
     [2, 0, 1, 0, -1, 0x06],
 ];
+const kHighlightMaterial = {
+    color: [1, 1, 1, 0.4],
+    liquid: false,
+    texture: null,
+    textureIndex: 0,
+};
 class TerrainMesher {
     constructor(registry, renderer) {
         this.solid = registry.solid;
@@ -71,6 +77,23 @@ class TerrainMesher {
         }
         return this.buildMesh(geo, old, solid);
     }
+    meshHighlight(pos, old) {
+        const geo = old ? old.getGeometry() : kCachedGeometryA;
+        geo.clear();
+        const forwards = 1 << 8;
+        const backward = -forwards;
+        const epsilon = 1 / 256;
+        const w = 1 + 2 * epsilon;
+        Vec3.set(kTmpPos, pos[0] - epsilon, pos[1] - epsilon, pos[2] - epsilon);
+        for (let d = 0; d < 3; d++) {
+            const u = (d + 1) % 3, v = (d + 2) % 3;
+            this.addQuad(geo, kHighlightMaterial, d, u, v, w, w, forwards, kTmpPos);
+            kTmpPos[d] += w;
+            this.addQuad(geo, kHighlightMaterial, d, u, v, w, w, backward, kTmpPos);
+            kTmpPos[d] = pos[d] - epsilon;
+        }
+        return this.buildMesh(geo, old, false);
+    }
     buildMesh(geo, old, solid) {
         if (geo.num_quads === 0) {
             if (old)
@@ -81,7 +104,7 @@ class TerrainMesher {
             old.setGeometry(geo);
             return old;
         }
-        return this.renderer.addBasicMesh(Geometry.clone(geo), solid);
+        return this.renderer.addVoxelMesh(Geometry.clone(geo), solid);
     }
     computeChunkGeometry(solid_geo, water_geo, voxels) {
         const { data, shape, stride } = voxels;

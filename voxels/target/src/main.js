@@ -9,6 +9,7 @@ import { sweep } from './sweep.js';
 class TypedEnv extends Env {
     constructor(id) {
         super(id);
+        this.addedBlock = kEmptyBlock;
         const ents = this.entities;
         this.position = ents.registerComponent('position', Position);
         this.movement = ents.registerComponent('movement', Movement(this));
@@ -206,6 +207,19 @@ const handleRunning = (dt, state, body, grounded) => {
     Vec3.scale(kTmpPush, kTmpPush, Math.min(bound, input) / length);
     Vec3.add(body.forces, body.forces, kTmpPush);
 };
+const tryToModifyBlock = (env, body, remove) => {
+    const target = env.getTargetedBlock();
+    if (target === null)
+        return;
+    Vec3.copy(kTmpPos, target);
+    if (!remove) {
+        const side = env.getTargetedBlockSide();
+        kTmpPos[side >> 1] += (side & 1) ? -1 : 1;
+    }
+    const block = remove ? kEmptyBlock : env.addedBlock;
+    // TODO(skishore): When adding a block, check for a collision with body.
+    env.world.setBlock(kTmpPos[0], kTmpPos[1], kTmpPos[2], block);
+};
 const runMovement = (env, dt, state) => {
     dt = dt / 1000;
     // Process the inputs to get a heading, running, and jumping state.
@@ -247,6 +261,12 @@ const runMovement = (env, dt, state) => {
     }
     else {
         body.friction = state.standingFriction;
+    }
+    // Turn mouse inputs into actions.
+    if (inputs.mouse0 || inputs.mouse1) {
+        tryToModifyBlock(env, body, inputs.mouse0);
+        inputs.mouse0 = false;
+        inputs.mouse1 = false;
     }
 };
 const Movement = (env) => ({
@@ -357,6 +377,7 @@ const main = () => {
     const water = registry.addBlock(['water', 'blue', 'blue'], false);
     const trunk = registry.addBlock(['trunk', 'trunk-side'], true);
     const leaves = registry.addBlock(['leaves'], true);
+    env.addedBlock = dirt;
     // Composite noise functions.
     const minetest_noise_2d = (offset, scale, spread, octaves, persistence, lacunarity) => {
         const components = new Array(octaves).fill(null).map(perlin2D);

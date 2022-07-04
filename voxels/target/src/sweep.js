@@ -5,7 +5,7 @@ const kSweepMask = kSweepResolution - 1;
 const kSpeeds = [0, 0, 0, 0];
 const kDistances = [0, 0, 0, kSweepResolution];
 const kVoxel = Vec3.create();
-const sweep = (min, max, delta, impacts, check) => {
+const sweep = (min, max, delta, impacts, check, stop_on_impact = false) => {
     for (let i = 0; i < 3; i++) {
         min[i] = (min[i] * kSweepResolution) | 0;
         max[i] = (max[i] * kSweepResolution) | 0;
@@ -69,6 +69,8 @@ const sweep = (min, max, delta, impacts, check) => {
                     done = true;
                 }
             }
+            if (done && stop_on_impact)
+                break;
         }
     }
     for (let i = 0; i < 3; i++) {
@@ -77,5 +79,5 @@ const sweep = (min, max, delta, impacts, check) => {
     }
 };
 //////////////////////////////////////////////////////////////////////////////
-export { sweep };
+export { kSweepResolution, sweep };
 //# sourceMappingURL=sweep.js.map

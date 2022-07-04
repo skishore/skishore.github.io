@@ -10,6 +10,7 @@ class Camera {
         this.zoom = 0;
         this.direction = Vec3.from(0, 0, 1);
         this.position = Vec3.create();
+        this.target = Vec3.create();
         this.last_dx = 0;
         this.last_dy = 0;
         this.transform_for = Mat4.create();
@@ -98,9 +99,12 @@ class Camera {
         Mat4.perspective(this.projection, 3 * Math.PI / 8, this.aspect, minZ);
         this.minZ = minZ;
     }
+    setSafeZoomDistance(zoom) {
+        zoom = Math.max(Math.min(zoom, this.zoom), 0);
+        Vec3.scaleAndAdd(this.position, this.target, this.direction, -zoom);
+    }
     setTarget(x, y, z) {
-        Vec3.set(this.position, x, y, z);
-        Vec3.scaleAndAdd(this.position, this.position, this.direction, -this.zoom);
+        Vec3.set(this.target, x, y, z);
     }
 }
 ;
@@ -404,7 +408,7 @@ Geometry.OffsetIndices = 15;
 Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
-const kBasicShader = `
+const kVoxelShader = `
   uniform ivec2 u_mask;
   uniform float u_move;
   uniform float u_wave;
@@ -437,40 +441,24 @@ const kBasicShader = `
     v_color = vec4(ao * vec3(a_color), a_color[3]);
 
     int dim = int(a_dim);
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+
     v_uvw = vec3(0, 0, a_texture);
     const float kTextureBuffer = 0.01;
     if (dim == 2) {
-      if (index == 1 || index == 2) {
-        v_uvw[0] = -a_dir * (a_size[0] - kTextureBuffer);
-      }
-      if (index == 0 || index == 1) {
-        v_uvw[1] = a_size[1] - kTextureBuffer;
-      }
+      v_uvw[0] = (a_size[0] - kTextureBuffer) * w * -a_dir;
+      v_uvw[1] = (a_size[1] - kTextureBuffer) * (1.0 - h);
     } else {
-      if (index == 2 || index == 3) {
-        v_uvw[0] = a_dir * (a_size[1] - kTextureBuffer);
-      }
-      if (index == 0 || index == 3) {
-        v_uvw[1] = a_size[0] - kTextureBuffer;
-      }
+      v_uvw[0] = (a_size[1] - kTextureBuffer) * h * a_dir;
+      v_uvw[1] = (a_size[0] - kTextureBuffer) * (1.0 - w);
     }
 
     v_move = a_wave * u_move;
 
-    const vec3 kShift[6] = vec3[6](
-      vec3(1, 0, 0),
-      vec3(0, 1, 0),
-      vec3(0, 0, 1),
-      vec3(1, 0, 0),
-      vec3(0, 1, 0),
-      vec3(0, 0, 1)
-    );
-    float w = float(((index + 1) & 3) >> 1);
-    float h = float(((index + 0) & 3) >> 1);
-
     vec3 pos = a_pos;
-    pos += w * a_size[0] * kShift[dim + 1];
-    pos += h * a_size[1] * kShift[dim + 2];
+    pos[(dim + 1) % 3] += w * a_size[0];
+    pos[(dim + 2) % 3] += h * a_size[1];
     pos -= vec3(0, a_wave * u_wave, 0);
     gl_Position = u_transform * vec4(pos, 1.0);
 
@@ -505,9 +493,9 @@ const kBasicShader = `
     }
   }
 `;
-class BasicShader extends Shader {
+class VoxelShader extends Shader {
     constructor(gl) {
-        super(gl, kBasicShader);
+        super(gl, kVoxelShader);
         this.u_mask = this.getUniformLocation('u_mask');
         this.u_move = this.getUniformLocation('u_move');
         this.u_wave = this.getUniformLocation('u_wave');
@@ -529,7 +517,7 @@ class BasicShader extends Shader {
 }
 ;
 const kDefaultMask = new Int32Array(2);
-class BasicMesh {
+class VoxelMesh {
     constructor(gl, shader, geo, meshes, hidden_meshes) {
         const index = meshes.length;
         meshes.push(this);
@@ -751,15 +739,15 @@ class Renderer {
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl);
         this.atlas = new TextureAtlas(gl);
-        this.shader = new BasicShader(gl);
+        this.shader = new VoxelShader(gl);
         this.solid_meshes = [];
         this.water_meshes = [];
         this.hidden_meshes = [];
     }
-    addBasicMesh(geo, solid) {
+    addVoxelMesh(geo, solid) {
         const { gl, atlas, shader, hidden_meshes } = this;
         const meshes = solid ? this.solid_meshes : this.water_meshes;
-        return new BasicMesh(gl, shader, geo, meshes, hidden_meshes);
+        return new VoxelMesh(gl, shader, geo, meshes, hidden_meshes);
     }
     render(move, wave) {
         const gl = this.gl;

@@ -1,7 +1,8 @@
-import { assert, nonnull, Tensor3 } from './base.js';
+import { assert, nonnull, Tensor3, Vec3 } from './base.js';
 import { EntityComponentSystem } from './ecs.js';
 import { Renderer } from './renderer.js';
 import { TerrainMesher } from './mesher.js';
+import { kSweepResolution, sweep } from './sweep.js';
 class Container {
     constructor(id) {
         this.element = nonnull(document.getElementById(id), () => id);
@@ -14,6 +15,8 @@ class Container {
             right: false,
             hover: false,
             space: false,
+            mouse0: false,
+            mouse1: false,
             pointer: false,
         };
         this.deltas = { x: 0, y: 0, scroll: 0 };
@@ -28,6 +31,7 @@ class Container {
         element.addEventListener('click', () => element.requestPointerLock());
         document.addEventListener('keydown', e => this.onKeyInput(e, true));
         document.addEventListener('keyup', e => this.onKeyInput(e, false));
+        document.addEventListener('mousedown', e => this.onMouseDown(e));
         document.addEventListener('mousemove', e => this.onMouseMove(e));
         document.addEventListener('touchmove', e => this.onMouseMove(e));
         document.addEventListener('pointerlockchange', e => this.onPointerInput(e));
@@ -42,6 +46,15 @@ class Container {
         const input = this.bindings.get(e.keyCode);
         if (input)
             this.onInput(e, input, down);
+    }
+    onMouseDown(e) {
+        if (!this.inputs.pointer)
+            return;
+        const button = e.button;
+        if (button === 0)
+            this.inputs.mouse0 = true;
+        if (button !== 0)
+            this.inputs.mouse1 = true;
     }
     onMouseMove(e) {
         if (!this.inputs.pointer)
@@ -856,13 +869,17 @@ class World {
     }
     remesh() {
         const { chunks, frontier } = this;
-        let meshed = 0;
+        let meshed = 0, total = 0;
         chunks.each((cx, cz) => {
+            total++;
+            if (total > 9 && meshed >= kNumChunksToMeshPerFrame)
+                return true;
             const chunk = chunks.get(cx, cz);
             if (!chunk || !chunk.needsRemesh())
                 return false;
             chunk.remeshChunk();
-            return (++meshed) === kNumChunksToMeshPerFrame;
+            meshed++;
+            return false;
         });
         frontier.remeshFrontier();
     }
@@ -875,11 +892,19 @@ class World {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
+const kTmpMin = Vec3.create();
+const kTmpMax = Vec3.create();
+const kTmpDelta = Vec3.create();
+const kTmpImpacts = Vec3.create();
+const kMinZLowerBound = 0.001;
+const kMinZUpperBound = 0.1;
 class Env {
     constructor(id) {
         this.cameraAlpha = 0;
         this.cameraBlock = kEmptyBlock;
         this.cameraColor = kWhite;
+        this.highlight = null;
+        this.highlightSide = 0;
         this.shouldMesh = true;
         this.frame = 0;
         this.container = new Container(id);
@@ -887,7 +912,14 @@ class Env {
         this.registry = new Registry();
         this.renderer = new Renderer(this.container.canvas);
         this.world = new World(this.registry, this.renderer);
+        this.highlightPosition = Vec3.create();
         this.timing = new Timing(this.render.bind(this), this.update.bind(this));
+    }
+    getTargetedBlock() {
+        return this.highlight ? this.highlightPosition : null;
+    }
+    getTargetedBlockSide() {
+        return this.highlightSide;
     }
     refresh() {
         const saved = this.container.inputs.pointer;
@@ -911,6 +943,8 @@ class Env {
         camera.applyInputs(deltas.x, deltas.y, deltas.scroll);
         deltas.x = deltas.y = deltas.scroll = 0;
         this.entities.render(dt);
+        this.setSafeZoomDistance();
+        this.updateHighlightMesh();
         this.updateOverlayColor(wave);
         const renderer_stats = this.renderer.render(move, wave);
         this.shouldMesh = true;
@@ -939,6 +973,65 @@ class Env {
         const result = this.world.getBlock(x, y, z);
         return result === kUnknownBlock ? kEmptyBlock : result;
     }
+    setSafeZoomDistance() {
+        const camera = this.renderer.camera;
+        const { direction, target, zoom } = camera;
+        const check = (pos) => {
+            const block = this.world.getBlock(pos[0], pos[1], pos[2]);
+            return !this.registry.solid[block];
+        };
+        const [x, y, z] = target;
+        const buffer = kMinZUpperBound;
+        Vec3.set(kTmpMin, x - buffer, y - buffer, z - buffer);
+        Vec3.set(kTmpMax, x + buffer, y + buffer, z + buffer);
+        Vec3.scale(kTmpDelta, direction, -zoom);
+        sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
+        Vec3.add(kTmpDelta, kTmpMin, kTmpMax);
+        Vec3.scale(kTmpDelta, kTmpDelta, 0.5);
+        Vec3.sub(kTmpDelta, kTmpDelta, target);
+        camera.setSafeZoomDistance(Vec3.length(kTmpDelta));
+    }
+    updateHighlightMesh() {
+        const camera = this.renderer.camera;
+        const { direction, target, zoom } = camera;
+        let remesh = false;
+        let shown = false;
+        const check = (pos) => {
+            const block = this.world.getBlock(pos[0], pos[1], pos[2]);
+            if (!this.registry.solid[block])
+                return true;
+            remesh = pos[0] !== this.highlightPosition[0] ||
+                pos[1] !== this.highlightPosition[1] ||
+                pos[2] !== this.highlightPosition[2] ||
+                this.highlight === null;
+            shown = true;
+            Vec3.copy(this.highlightPosition, pos);
+            return false;
+        };
+        const buffer = 1 / kSweepResolution;
+        const x = ((target[0] * kSweepResolution) | 0) / kSweepResolution;
+        const y = ((target[1] * kSweepResolution) | 0) / kSweepResolution;
+        const z = ((target[2] * kSweepResolution) | 0) / kSweepResolution;
+        Vec3.set(kTmpMin, x - buffer, y - buffer, z - buffer);
+        Vec3.set(kTmpMax, x + buffer, y + buffer, z + buffer);
+        Vec3.scale(kTmpDelta, direction, 10);
+        sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
+        for (let i = 0; i < 3; i++) {
+            const impact = kTmpImpacts[i];
+            if (impact === 0)
+                continue;
+            this.highlightSide = 2 * i + (impact < 0 ? 0 : 1);
+            break;
+        }
+        if (this.highlight && !shown) {
+            this.highlight.dispose();
+            this.highlight = null;
+        }
+        else if (remesh) {
+            const pos = this.highlightPosition;
+            this.highlight = this.world.mesher.meshHighlight(pos, this.highlight);
+        }
+    }
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;
         const xi = Math.floor(x), zi = Math.floor(z);
@@ -947,9 +1040,11 @@ class Env {
         const old_block = this.cameraBlock;
         const new_block = this.getRenderBlock(xi, yi, zi);
         this.cameraBlock = new_block;
-        const focus = new_block === kEmptyBlock && yf < 0.2 &&
+        const max = kMinZUpperBound;
+        const min = kMinZLowerBound;
+        const focus = new_block === kEmptyBlock && yf < 2 * max &&
             this.getRenderBlock(xi, yi - 1, zi) !== kEmptyBlock;
-        this.renderer.camera.setMinZ(focus ? Math.max(yf / 2, 0.001) : 0.1);
+        this.renderer.camera.setMinZ(focus ? Math.max(yf / 2, min) : max);
         if (new_block === kEmptyBlock) {
             const changed = new_block !== old_block;
             if (changed)
