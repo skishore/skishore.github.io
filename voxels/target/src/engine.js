@@ -903,8 +903,7 @@ class Env {
         this.cameraAlpha = 0;
         this.cameraBlock = kEmptyBlock;
         this.cameraColor = kWhite;
-        this.highlight = null;
-        this.highlightSide = 0;
+        this.highlightSide = -1;
         this.shouldMesh = true;
         this.frame = 0;
         this.container = new Container(id);
@@ -912,11 +911,13 @@ class Env {
         this.registry = new Registry();
         this.renderer = new Renderer(this.container.canvas);
         this.world = new World(this.registry, this.renderer);
+        this.highlight = this.world.mesher.meshHighlight();
+        this.highlightMask = new Int32Array(2);
         this.highlightPosition = Vec3.create();
         this.timing = new Timing(this.render.bind(this), this.update.bind(this));
     }
     getTargetedBlock() {
-        return this.highlight ? this.highlightPosition : null;
+        return this.highlightSide < 0 ? null : this.highlightPosition;
     }
     getTargetedBlockSide() {
         return this.highlightSide;
@@ -994,17 +995,29 @@ class Env {
     updateHighlightMesh() {
         const camera = this.renderer.camera;
         const { direction, target, zoom } = camera;
-        let remesh = false;
-        let shown = false;
+        let move = false;
+        this.highlightMask[0] = (1 << 6) - 1;
         const check = (pos) => {
+            const [x, y, z] = pos;
             const block = this.world.getBlock(pos[0], pos[1], pos[2]);
             if (!this.registry.solid[block])
                 return true;
-            remesh = pos[0] !== this.highlightPosition[0] ||
+            let mask = 0;
+            for (let d = 0; d < 3; d++) {
+                pos[d] += 1;
+                const b0 = this.world.getBlock(pos[0], pos[1], pos[2]);
+                if (this.registry.solid[b0])
+                    mask |= (1 << (2 * d + 0));
+                pos[d] -= 2;
+                const b1 = this.world.getBlock(pos[0], pos[1], pos[2]);
+                if (this.registry.solid[b1])
+                    mask |= (1 << (2 * d + 1));
+                pos[d] += 1;
+            }
+            move = pos[0] !== this.highlightPosition[0] ||
                 pos[1] !== this.highlightPosition[1] ||
-                pos[2] !== this.highlightPosition[2] ||
-                this.highlight === null;
-            shown = true;
+                pos[2] !== this.highlightPosition[2];
+            this.highlightMask[0] = mask;
             Vec3.copy(this.highlightPosition, pos);
             return false;
         };
@@ -1023,14 +1036,11 @@ class Env {
             this.highlightSide = 2 * i + (impact < 0 ? 0 : 1);
             break;
         }
-        if (this.highlight && !shown) {
-            this.highlight.dispose();
-            this.highlight = null;
-        }
-        else if (remesh) {
+        if (move) {
             const pos = this.highlightPosition;
-            this.highlight = this.world.mesher.meshHighlight(pos, this.highlight);
+            this.highlight.setPosition(pos[0], pos[1], pos[2]);
         }
+        this.highlight.show(this.highlightMask, true);
     }
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;

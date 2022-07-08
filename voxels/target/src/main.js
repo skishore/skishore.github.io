@@ -207,17 +207,26 @@ const handleRunning = (dt, state, body, grounded) => {
     Vec3.scale(kTmpPush, kTmpPush, Math.min(bound, input) / length);
     Vec3.add(body.forces, body.forces, kTmpPush);
 };
-const tryToModifyBlock = (env, body, remove) => {
+const tryToModifyBlock = (env, body, add) => {
     const target = env.getTargetedBlock();
     if (target === null)
         return;
     Vec3.copy(kTmpPos, target);
-    if (!remove) {
+    if (add) {
         const side = env.getTargetedBlockSide();
         kTmpPos[side >> 1] += (side & 1) ? -1 : 1;
+        let intersect = true;
+        const { max, min } = body;
+        for (let i = 0; i < 3; i++) {
+            const pos = kTmpPos[i];
+            if (pos < max[i] && min[i] < pos + 1)
+                continue;
+            intersect = false;
+        }
+        if (intersect)
+            return;
     }
-    const block = remove ? kEmptyBlock : env.addedBlock;
-    // TODO(skishore): When adding a block, check for a collision with body.
+    const block = add ? env.addedBlock : kEmptyBlock;
     env.world.setBlock(kTmpPos[0], kTmpPos[1], kTmpPos[2], block);
 };
 const runMovement = (env, dt, state) => {
@@ -264,7 +273,7 @@ const runMovement = (env, dt, state) => {
     }
     // Turn mouse inputs into actions.
     if (inputs.mouse0 || inputs.mouse1) {
-        tryToModifyBlock(env, body, inputs.mouse0);
+        tryToModifyBlock(env, body, !inputs.mouse0);
         inputs.mouse0 = false;
         inputs.mouse1 = false;
     }

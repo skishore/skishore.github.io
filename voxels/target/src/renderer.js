@@ -408,6 +408,68 @@ Geometry.OffsetIndices = 15;
 Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
+class Buffer {
+    constructor(gl, length, freeList) {
+        this.usage = 0;
+        const buffer = nonnull(gl.createBuffer());
+        gl.bindBuffer(ARRAY_BUFFER, buffer);
+        gl.bufferData(ARRAY_BUFFER, length, gl.STATIC_DRAW);
+        this.freeList = freeList;
+        this.buffer = buffer;
+        this.length = length;
+    }
+}
+;
+class BufferAllocator {
+    constructor() {
+        this.bytes_total = 0;
+        this.bytes_alloc = 0;
+        this.bytes_usage = 0;
+        this.freeLists = new Array(32).fill(null).map(() => []);
+    }
+    alloc(gl, data) {
+        const bytes = 4 * data.length;
+        const sizeClass = this.sizeClass(bytes);
+        const freeList = this.freeLists[sizeClass];
+        const length = 1 << sizeClass;
+        let buffer = freeList.pop();
+        if (buffer) {
+            gl.bindBuffer(ARRAY_BUFFER, buffer.buffer);
+        }
+        else {
+            buffer = new Buffer(gl, length, freeList);
+            this.bytes_total += length;
+        }
+        buffer.usage = bytes;
+        gl.bufferSubData(ARRAY_BUFFER, 0, data, 0, data.length);
+        this.bytes_alloc += buffer.length;
+        this.bytes_usage += buffer.usage;
+        return buffer;
+    }
+    free(buffer) {
+        buffer.freeList.push(buffer);
+        this.bytes_alloc -= buffer.length;
+        this.bytes_usage -= buffer.usage;
+    }
+    stats() {
+        const { bytes_usage, bytes_alloc, bytes_total } = this;
+        const usage = this.formatSize(bytes_usage);
+        const alloc = this.formatSize(bytes_alloc);
+        const total = this.formatSize(bytes_total);
+        return `VRAM: ${usage} / ${alloc} / ${total}Mb`;
+    }
+    formatSize(bytes) {
+        return `${(bytes / (1024 * 1024)).toFixed(2)}`;
+    }
+    sizeClass(bytes) {
+        const result = 32 - Math.clz32(bytes - 1);
+        assert((1 << result) >= bytes);
+        return result;
+    }
+}
+;
+const kAllocator = new BufferAllocator();
+//////////////////////////////////////////////////////////////////////////////
 const kVoxelShader = `
   uniform ivec2 u_mask;
   uniform float u_move;
@@ -459,7 +521,7 @@ const kVoxelShader = `
     vec3 pos = a_pos;
     pos[(dim + 1) % 3] += w * a_size[0];
     pos[(dim + 2) % 3] += h * a_size[1];
-    pos -= vec3(0, a_wave * u_wave, 0);
+    pos[1] -= a_wave * u_wave;
     gl_Position = u_transform * vec4(pos, 1.0);
 
     int mask = int(a_mask);
@@ -574,9 +636,11 @@ class VoxelMesh {
         meshes.push(this);
     }
     destroyBuffers() {
-        const gl = this.gl;
+        const { gl, quads } = this;
+        const n = this.geo.num_quads * Geometry.Stride;
         gl.deleteVertexArray(this.vao);
-        gl.deleteBuffer(this.quads);
+        if (quads)
+            kAllocator.free(quads);
         this.vao = null;
         this.quads = null;
     }
@@ -609,11 +673,9 @@ class VoxelMesh {
         gl.vertexAttribDivisor(location, 2);
     }
     prepareQuads(data) {
-        const gl = this.gl;
-        const buffer = nonnull(gl.createBuffer());
-        gl.bindBuffer(ARRAY_BUFFER, buffer);
-        gl.bufferData(ARRAY_BUFFER, data, gl.STATIC_DRAW);
-        this.quads = buffer;
+        const n = this.geo.num_quads * Geometry.Stride;
+        const subarray = data.length > n ? data.subarray(0, n) : data;
+        this.quads = kAllocator.alloc(this.gl, subarray);
     }
     removeFromMeshes() {
         const meshes = this.shown ? this.meshes : this.hidden_meshes;
@@ -745,6 +807,7 @@ class Renderer {
         this.hidden_meshes = [];
     }
     addVoxelMesh(geo, solid) {
+        assert(geo.num_quads > 0);
         const { gl, atlas, shader, hidden_meshes } = this;
         const meshes = solid ? this.solid_meshes : this.water_meshes;
         return new VoxelMesh(gl, shader, geo, meshes, hidden_meshes);
@@ -766,10 +829,14 @@ class Renderer {
         let drawn = 0;
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
+        // Opaque and alpha-tested voxel meshes.
+        gl.disable(gl.BLEND);
         for (const mesh of this.solid_meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
+        gl.enable(gl.BLEND);
+        // Alpha-blended voxel meshes. (Should we sort them?)
         gl.depthMask(false);
         gl.disable(gl.CULL_FACE);
         gl.uniform1i(this.shader.u_alphaTest, 0);
@@ -781,7 +848,7 @@ class Renderer {
         gl.depthMask(true);
         this.overlay.draw();
         const total = this.solid_meshes.length + this.water_meshes.length;
-        return `Draw calls: ${drawn} / ${total}`;
+        return `${kAllocator.stats()}\r\nDraw calls: ${drawn} / ${total}`;
     }
     setOverlayColor(color) {
         this.overlay.setColor(color);
