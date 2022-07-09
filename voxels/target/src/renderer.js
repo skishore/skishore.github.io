@@ -292,6 +292,63 @@ class TextureAtlas {
     }
 }
 ;
+;
+class SpriteAtlas {
+    constructor(gl) {
+        this.gl = gl;
+        this.canvas = null;
+        this.sprites = new Map();
+    }
+    addSprite(sprite) {
+        const url = sprite.url;
+        const existing = this.sprites.get(url);
+        if (existing)
+            return existing;
+        const created = nonnull(this.gl.createTexture());
+        this.sprites.set(url, created);
+        const image = new Image();
+        image.src = url;
+        image.addEventListener('load', () => this.loaded(sprite, image, created));
+        return created;
+    }
+    loaded(sprite, image, texture) {
+        assert(image.complete);
+        const { x, y } = sprite;
+        const w = image.width;
+        const h = image.height;
+        if (w % x !== 0 || h % y !== 0) {
+            throw new Error(`({w} x ${h}) image cannot fit (${x} x ${y}) frames.`);
+        }
+        const cols = w / x, rows = h / y;
+        const frames = cols * rows;
+        if (this.canvas === null) {
+            const element = document.createElement('canvas');
+            const canvas = nonnull(element.getContext('2d'));
+            this.canvas = canvas;
+        }
+        const canvas = this.canvas;
+        canvas.canvas.width = x;
+        canvas.canvas.height = y * frames;
+        const length = w * h * 4;
+        canvas.clearRect(0, 0, x, y * frames);
+        for (let i = 0; i < frames; i++) {
+            const sx = x * (i % cols);
+            const sy = y * Math.floor(i / cols);
+            canvas.drawImage(image, sx, sy, x, y, 0, y * i, x, y);
+        }
+        const pixels = canvas.getImageData(0, 0, x, y * frames).data;
+        assert(pixels.length === length);
+        const gl = this.gl;
+        gl.bindTexture(TEXTURE_2D_ARRAY, texture);
+        gl.texImage3D(TEXTURE_2D_ARRAY, 0, gl.RGBA, x, y, frames, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        const id = TEXTURE_2D_ARRAY;
+        gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(id, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(id, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    }
+}
+;
 //////////////////////////////////////////////////////////////////////////////
 class Geometry {
     constructor(quads, num_quads) {
@@ -318,22 +375,14 @@ class Geometry {
         expanded.set(this.quads);
         this.quads = expanded;
     }
-    cull(delta, planes) {
+    getBounds() {
         if (this.dirty)
             this.computeBounds();
-        const bounds = this.bounds;
-        for (const plane of planes) {
-            const { x, y, z, index } = plane;
-            const bound = bounds[index];
-            const value = (bound[0] + delta[0]) * x +
-                (bound[1] + delta[1]) * y +
-                (bound[2] + delta[2]) * z;
-            if (value < 0)
-                return true;
-        }
-        return false;
+        return this.bounds;
     }
     computeBounds() {
+        if (!this.dirty)
+            return this.bounds;
         const { lower_bound, upper_bound } = this;
         Vec3.set(lower_bound, Infinity, Infinity, Infinity);
         Vec3.set(upper_bound, -Infinity, -Infinity, -Infinity);
@@ -421,13 +470,15 @@ class Buffer {
 }
 ;
 class BufferAllocator {
-    constructor() {
+    constructor(gl) {
         this.bytes_total = 0;
         this.bytes_alloc = 0;
         this.bytes_usage = 0;
+        this.gl = gl;
         this.freeLists = new Array(32).fill(null).map(() => []);
     }
-    alloc(gl, data) {
+    alloc(data) {
+        const gl = this.gl;
         const bytes = 4 * data.length;
         const sizeClass = this.sizeClass(bytes);
         const freeList = this.freeLists[sizeClass];
@@ -468,7 +519,57 @@ class BufferAllocator {
     }
 }
 ;
-const kAllocator = new BufferAllocator();
+;
+class Mesh {
+    constructor(manager, meshes) {
+        this.index = -1;
+        this.gl = manager.gl;
+        this.shader = manager.shader;
+        this.meshes = meshes;
+        this.position = Vec3.create();
+        this.addToMeshes();
+    }
+    cull(bounds, camera, planes) {
+        const position = this.position;
+        const camera_position = camera.position;
+        const dx = position[0] - camera_position[0];
+        const dy = position[1] - camera_position[1];
+        const dz = position[2] - camera_position[2];
+        for (const plane of planes) {
+            const { x, y, z, index } = plane;
+            const bound = bounds[index];
+            const bx = bound[0], by = bound[1], bz = bound[2];
+            const value = (bx + dx) * x + (by + dy) * y + (bz + dz) * z;
+            if (value < 0)
+                return true;
+        }
+        return false;
+    }
+    setPosition(x, y, z) {
+        Vec3.set(this.position, x, y, z);
+    }
+    addToMeshes() {
+        assert(this.index === -1);
+        this.index = this.meshes.length;
+        this.meshes.push(this);
+    }
+    removeFromMeshes() {
+        const meshes = this.meshes;
+        assert(this === meshes[this.index]);
+        const last = meshes.length - 1;
+        if (this.index !== last) {
+            const swap = meshes[last];
+            meshes[this.index] = swap;
+            swap.index = this.index;
+        }
+        meshes.pop();
+        this.index = -1;
+    }
+    shown() {
+        return this.index >= 0;
+    }
+}
+;
 //////////////////////////////////////////////////////////////////////////////
 const kVoxelShader = `
   uniform ivec2 u_mask;
@@ -579,29 +680,27 @@ class VoxelShader extends Shader {
 }
 ;
 const kDefaultMask = new Int32Array(2);
-class VoxelMesh {
-    constructor(gl, shader, geo, meshes, hidden_meshes) {
-        const index = meshes.length;
-        meshes.push(this);
-        this.gl = gl;
-        this.shader = shader;
-        this.geo = geo;
-        this.meshes = meshes;
-        this.hidden_meshes = hidden_meshes;
+class VoxelMesh extends Mesh {
+    constructor(manager, meshes, geo) {
+        super(manager, meshes);
         this.vao = null;
         this.quads = null;
-        this.position = Vec3.create();
-        this.index = index;
-        this.shown = true;
         this.mask = kDefaultMask;
+        this.allocator = manager.allocator;
+        this.geo = geo;
+    }
+    dispose() {
+        this.destroyBuffers();
+        this.mask = kDefaultMask;
+        if (this.shown())
+            this.removeFromMeshes();
     }
     draw(camera, planes) {
-        const position = this.position;
-        Vec3.sub(kTmpDelta, position, camera.position);
-        if (this.geo.cull(kTmpDelta, planes))
+        const bounds = this.geo.getBounds();
+        if (this.cull(bounds, camera, planes))
             return false;
         this.prepareBuffers();
-        const transform = camera.getTransformFor(position);
+        const transform = camera.getTransformFor(this.position);
         const gl = this.gl;
         const n = this.geo.num_quads;
         gl.bindVertexArray(this.vao);
@@ -609,11 +708,6 @@ class VoxelMesh {
         gl.uniformMatrix4fv(this.shader.u_transform, false, transform);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, n * 2);
         return true;
-    }
-    dispose() {
-        this.destroyBuffers();
-        this.removeFromMeshes();
-        this.mask = kDefaultMask;
     }
     getGeometry() {
         return this.geo;
@@ -627,20 +721,17 @@ class VoxelMesh {
     }
     show(mask, shown) {
         this.mask = mask;
-        if (shown === this.shown)
+        if (shown === this.shown())
             return;
-        this.removeFromMeshes();
-        const meshes = shown ? this.meshes : this.hidden_meshes;
-        this.index = meshes.length;
-        this.shown = shown;
-        meshes.push(this);
+        shown ? this.addToMeshes() : this.removeFromMeshes();
+        assert(shown === this.shown());
     }
     destroyBuffers() {
         const { gl, quads } = this;
         const n = this.geo.num_quads * Geometry.Stride;
         gl.deleteVertexArray(this.vao);
         if (quads)
-            kAllocator.free(quads);
+            this.allocator.free(quads);
         this.vao = null;
         this.quads = null;
     }
@@ -675,18 +766,171 @@ class VoxelMesh {
     prepareQuads(data) {
         const n = this.geo.num_quads * Geometry.Stride;
         const subarray = data.length > n ? data.subarray(0, n) : data;
-        this.quads = kAllocator.alloc(this.gl, subarray);
+        this.quads = this.allocator.alloc(subarray);
     }
-    removeFromMeshes() {
-        const meshes = this.shown ? this.meshes : this.hidden_meshes;
-        assert(this === meshes[this.index]);
-        const last = meshes.length - 1;
-        if (this.index !== last) {
-            const swap = meshes[last];
-            meshes[this.index] = swap;
-            swap.index = this.index;
+}
+;
+class VoxelManager {
+    constructor(gl) {
+        this.gl = gl;
+        this.shader = new VoxelShader(gl);
+        this.atlas = new TextureAtlas(gl);
+        this.allocator = new BufferAllocator(gl);
+        this.solid_meshes = [];
+        this.water_meshes = [];
+    }
+    addMesh(geo, solid) {
+        assert(geo.num_quads > 0);
+        const meshes = solid ? this.solid_meshes : this.water_meshes;
+        return new VoxelMesh(this, meshes, geo);
+    }
+    render(camera, planes, stats, overlay, move, wave) {
+        const { atlas, gl, shader } = this;
+        let drawn = 0;
+        atlas.bind();
+        shader.bind();
+        const fog_color = overlay.getFogColor();
+        const fog_depth = overlay.getFogDepth();
+        gl.uniform1f(shader.u_move, move);
+        gl.uniform1f(shader.u_wave, wave);
+        gl.uniform1i(shader.u_alphaTest, 1);
+        gl.uniform3fv(shader.u_fogColor, fog_color);
+        gl.uniform1f(shader.u_fogDepth, fog_depth);
+        // Opaque and alpha-tested voxel meshes.
+        for (const mesh of this.solid_meshes) {
+            if (mesh.draw(camera, planes))
+                drawn++;
         }
-        meshes.pop();
+        // Alpha-blended voxel meshes. (Should we sort them?)
+        gl.depthMask(false);
+        gl.enable(gl.BLEND);
+        gl.disable(gl.CULL_FACE);
+        gl.uniform1i(shader.u_alphaTest, 0);
+        for (const mesh of this.water_meshes) {
+            if (mesh.draw(camera, planes))
+                drawn++;
+        }
+        gl.enable(gl.CULL_FACE);
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+        stats.drawn += drawn;
+        stats.total += this.solid_meshes.length + this.water_meshes.length;
+    }
+}
+;
+//////////////////////////////////////////////////////////////////////////////
+const kSpriteShader = `
+  uniform float u_size;
+  uniform vec2 u_billboard;
+  uniform mat4 u_transform;
+  out vec2 v_uv;
+
+  void main() {
+    int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID : 0);
+
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+    v_uv = vec2(w, 1.0 - h);
+
+    float x = u_size * (w - 0.5);
+    vec4 pos = vec4(x * u_billboard[0], u_size * h, x * u_billboard[1], 1);
+    gl_Position = u_transform * pos;
+  }
+#split
+  precision highp float;
+  precision highp sampler2DArray;
+
+  uniform float u_frame;
+  uniform sampler2DArray u_texture;
+  in vec2 v_uv;
+  out vec4 o_color;
+
+  void main() {
+    o_color = texture(u_texture, vec3(v_uv, u_frame));
+    if (o_color[3] < 0.5) discard;
+    o_color[3] = 1.0;
+  }
+`;
+class SpriteShader extends Shader {
+    constructor(gl) {
+        super(gl, kSpriteShader);
+        this.u_size = this.getUniformLocation('u_size');
+        this.u_billboard = this.getUniformLocation('u_billboard');
+        this.u_transform = this.getUniformLocation('u_transform');
+        this.u_frame = this.getUniformLocation('u_frame');
+    }
+}
+;
+class SpriteMesh extends Mesh {
+    constructor(manager, meshes, sprite) {
+        super(manager, meshes);
+        this.frame = 0;
+        this.manager = manager;
+        this.size = sprite.size;
+        this.texture = manager.atlas.addSprite(sprite);
+    }
+    dispose() {
+        if (this.shown())
+            this.removeFromMeshes();
+    }
+    draw(camera, planes) {
+        const bounds = this.manager.getBounds(this.size);
+        if (this.cull(bounds, camera, planes))
+            return false;
+        const transform = camera.getTransformFor(this.position);
+        const { gl, shader } = this;
+        gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
+        gl.uniform1f(shader.u_size, this.size);
+        gl.uniform1f(shader.u_frame, this.frame);
+        gl.uniformMatrix4fv(shader.u_transform, false, transform);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
+        return true;
+    }
+    setFrame(frame) {
+        this.frame = frame;
+    }
+    setPosition(x, y, z) {
+        Vec3.set(this.position, x, y, z);
+    }
+}
+;
+class SpriteManager {
+    constructor(gl) {
+        this.gl = gl;
+        this.shader = new SpriteShader(gl);
+        this.atlas = new SpriteAtlas(gl);
+        this.billboard = new Float32Array(2);
+        this.bounds = Array(8).fill(null).map(() => Vec3.create());
+        this.meshes = [];
+    }
+    addMesh(sprite) {
+        return new SpriteMesh(this, this.meshes, sprite);
+    }
+    getBounds(size) {
+        const result = this.bounds;
+        const half_size = 0.5 * size;
+        for (let i = 0; i < 8; i++) {
+            const bound = result[i];
+            bound[0] = (i & 1) ? half_size : -half_size;
+            bound[1] = (i & 2) ? half_size : -half_size;
+            bound[2] = (i & 4) ? size : 0;
+        }
+        return result;
+    }
+    render(camera, planes, stats) {
+        const { billboard, gl, shader } = this;
+        let drawn = 0;
+        // All sprite meshes are alpha-tested for now.
+        shader.bind();
+        billboard[0] = Math.cos(camera.heading);
+        billboard[1] = -Math.sin(camera.heading);
+        gl.uniform2fv(shader.u_billboard, billboard);
+        for (const mesh of this.meshes) {
+            if (mesh.draw(camera, planes))
+                drawn++;
+        }
+        stats.drawn += drawn;
+        stats.total += this.meshes.length;
     }
 }
 ;
@@ -779,6 +1023,9 @@ class ScreenOverlay {
 }
 ;
 ;
+;
+;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
@@ -796,59 +1043,38 @@ class Renderer {
         gl.depthFunc(gl.LEQUAL);
         gl.enable(gl.CULL_FACE);
         gl.cullFace(gl.BACK);
-        gl.enable(gl.BLEND);
+        gl.disable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl);
-        this.atlas = new TextureAtlas(gl);
-        this.shader = new VoxelShader(gl);
-        this.solid_meshes = [];
-        this.water_meshes = [];
-        this.hidden_meshes = [];
+        this.sprite_manager = new SpriteManager(gl);
+        this.voxels_manager = new VoxelManager(gl);
+    }
+    addTexture(texture) {
+        return this.voxels_manager.atlas.addTexture(texture);
+    }
+    addSpriteMesh(sprite) {
+        return this.sprite_manager.addMesh(sprite);
     }
     addVoxelMesh(geo, solid) {
-        assert(geo.num_quads > 0);
-        const { gl, atlas, shader, hidden_meshes } = this;
-        const meshes = solid ? this.solid_meshes : this.water_meshes;
-        return new VoxelMesh(gl, shader, geo, meshes, hidden_meshes);
+        return this.voxels_manager.addMesh(geo, solid);
     }
     render(move, wave) {
-        const gl = this.gl;
+        const { gl, overlay } = this;
         const [r, g, b] = kDefaultSkyColor;
         gl.clearColor(r, g, b, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        this.atlas.bind();
-        this.shader.bind();
-        const fog_color = this.overlay.getFogColor();
-        const fog_depth = this.overlay.getFogDepth();
-        gl.uniform1f(this.shader.u_move, move);
-        gl.uniform1f(this.shader.u_wave, wave);
-        gl.uniform1i(this.shader.u_alphaTest, 1);
-        gl.uniform3fv(this.shader.u_fogColor, fog_color);
-        gl.uniform1f(this.shader.u_fogDepth, fog_depth);
-        let drawn = 0;
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
-        // Opaque and alpha-tested voxel meshes.
-        gl.disable(gl.BLEND);
-        for (const mesh of this.solid_meshes) {
-            if (mesh.draw(camera, planes))
-                drawn++;
-        }
+        const stats = { drawn: 0, total: 0 };
+        this.sprite_manager.render(camera, planes, stats);
+        this.voxels_manager.render(camera, planes, stats, overlay, move, wave);
+        // Alpha-blended overlay.
         gl.enable(gl.BLEND);
-        // Alpha-blended voxel meshes. (Should we sort them?)
-        gl.depthMask(false);
-        gl.disable(gl.CULL_FACE);
-        gl.uniform1i(this.shader.u_alphaTest, 0);
-        for (const mesh of this.water_meshes) {
-            if (mesh.draw(camera, planes))
-                drawn++;
-        }
-        gl.enable(gl.CULL_FACE);
-        gl.depthMask(true);
-        this.overlay.draw();
-        const total = this.solid_meshes.length + this.water_meshes.length;
-        return `${kAllocator.stats()}\r\nDraw calls: ${drawn} / ${total}`;
+        overlay.draw();
+        gl.disable(gl.BLEND);
+        return `${this.voxels_manager.allocator.stats()}\r\n` +
+            `Draw calls: ${stats.drawn} / ${stats.total}`;
     }
     setOverlayColor(color) {
         this.overlay.setColor(color);

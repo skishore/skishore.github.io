@@ -14,6 +14,7 @@ class TypedEnv extends Env {
         this.position = ents.registerComponent('position', Position);
         this.movement = ents.registerComponent('movement', Movement(this));
         this.physics = ents.registerComponent('physics', Physics(this));
+        this.meshes = ents.registerComponent('meshes', Meshes(this));
         this.target = ents.registerComponent('camera-target', CameraTarget(this));
     }
 }
@@ -307,6 +308,40 @@ const Movement = (env) => ({
             runMovement(env, dt, state);
     }
 });
+;
+const Meshes = (env) => ({
+    init: () => ({ id: kNoEntity, index: 0, mesh: null, frame: 0 }),
+    onRemove: (state) => { if (state.mesh)
+        state.mesh.dispose(); },
+    onRender: (dt, states) => {
+        for (const state of states) {
+            if (!state.mesh)
+                continue;
+            const { x, y, z, h } = env.position.getX(state.id);
+            state.mesh.setPosition(x, y - h / 2, z);
+        }
+    },
+    onUpdate: (dt, states) => {
+        for (const state of states) {
+            if (!state.mesh)
+                return;
+            const body = env.physics.get(state.id);
+            if (!body)
+                return;
+            const setting = (() => {
+                if (!body.resting[1])
+                    return 1;
+                const speed = Vec3.length(body.vel);
+                state.frame = speed ? (state.frame + 0.025 * speed) % 4 : 0;
+                if (!speed)
+                    return 0;
+                const value = Math.floor(state.frame);
+                return value & 1 ? 0 : (value + 2) >> 1;
+            })();
+            state.mesh.setFrame(setting);
+        }
+    },
+});
 // CameraTarget signifies that the camera will follow an entity.
 const CameraTarget = (env) => ({
     init: () => ({ id: kNoEntity, index: 0 }),
@@ -351,8 +386,12 @@ const main = () => {
     position.x = 1;
     position.y = kWorldHeight;
     position.z = 1;
-    position.w = 0.8;
-    position.h = 1.6;
+    position.w = 0.7;
+    position.h = 1.4;
+    const size = 1.25 * position.h;
+    const mesh = env.meshes.add(player);
+    const sprite = { url: 'images/player.png', size, x: 32, y: 32 };
+    mesh.mesh = env.renderer.addSpriteMesh(sprite);
     env.physics.add(player);
     env.movement.add(player);
     env.target.add(player);

@@ -89,9 +89,9 @@ class TerrainMesher {
         for (let d = 0; d < 3; d++) {
             const u = (d + 1) % 3, v = (d + 2) % 3;
             kTmpPos[d] = pos + w;
-            this.addQuad(geo, kHighlightMaterial, d, u, v, w, w, forwards, kTmpPos);
+            this.addQuad(geo, kHighlightMaterial, d, w, w, forwards, kTmpPos);
             kTmpPos[d] = pos;
-            this.addQuad(geo, kHighlightMaterial, d, u, v, w, w, backward, kTmpPos);
+            this.addQuad(geo, kHighlightMaterial, d, w, w, backward, kTmpPos);
         }
         assert(geo.num_quads === 6);
         const { OffsetMask, Stride } = Geometry;
@@ -116,12 +116,38 @@ class TerrainMesher {
         const { data, shape, stride } = voxels;
         for (let d = 0; d < 3; d++) {
             const dir = d * 2;
-            const u = (d + 1) % 3;
-            const v = (d + 2) % 3;
+            const v = (d === 1 ? 0 : 1);
+            const u = 3 - d - v;
             const ld = shape[d] - 1, lu = shape[u] - 2, lv = shape[v] - 2;
             const sd = stride[d], su = stride[u], sv = stride[v];
             const base = su + sv;
-            Vec3.set(kTmpPos, 0, 0, 0);
+            // d is the dimension that the quad faces. A d of {0, 1, 2} corresponds
+            // to a quad with a normal that's a unit vector on the {x, y, z} axis,
+            // respectively. u and v are the orthogonal dimensions along which we
+            // compute the quad's width and height.
+            //
+            // The simplest way to handle coordinates here is to let (d, u, v)
+            // be consecutive dimensions mod 3. That's how VoxelShader interprets
+            // data for a quad facing a given dimension d.
+            //
+            // However, to optimize greedy meshing, we want to take advantage of
+            // the fact that the y-axis is privileged in multiple ways:
+            //
+            //    1. Our chunks are limited in the x- and z-dimensions, but span
+            //       the entire world in the y-dimension, so this axis is longer.
+            //
+            //    2. The caller may have a heightmap limiting the maximum height
+            //       of a voxel by (x, z) coordinate, which we can use to cut the
+            //       greedy meshing inner loop short.
+            //
+            // As a result, we tweak the d = 0 case to use (u, v) = (2, 1) instead
+            // of (u, v) = (1, 2). To map back to the standard coordinates used by
+            // the shader, we only need to fix up two inputs to addQuad: (w, h) and
+            // the bit-packed AO mask. w_fixed, h_fixed, su_fixed, and sv_fixed are
+            // the standard-coordinates versions of these values.
+            //
+            const su_fixed = d > 0 ? su : sv;
+            const sv_fixed = d > 0 ? sv : su;
             const area = lu * lv;
             if (kMaskData.length < area) {
                 kMaskData = new Int32Array(area);
@@ -153,8 +179,8 @@ class TerrainMesher {
                             ? this.getBlockFaceMaterial(block0, dir)
                             : -this.getBlockFaceMaterial(block1, dir + 1);
                         const ao = facing > 0
-                            ? this.packAOMask(data, index + sd, index, su, sv)
-                            : this.packAOMask(data, index, index + sd, su, sv);
+                            ? this.packAOMask(data, index + sd, index, su_fixed, sv_fixed)
+                            : this.packAOMask(data, index, index + sd, su_fixed, sv_fixed);
                         const mask = (material << 8) | ao;
                         kMaskData[n] = mask;
                         kMaskUnion[iu] |= mask;
@@ -205,10 +231,12 @@ class TerrainMesher {
                         const id = Math.abs(mask >> 8);
                         const material = this.getMaterialData(id);
                         const geo = material.color[3] < 1 ? water_geo : solid_geo;
-                        this.addQuad(geo, material, d, u, v, w, h, mask, kTmpPos);
+                        const w_fixed = d > 0 ? w : h;
+                        const h_fixed = d > 0 ? h : w;
+                        this.addQuad(geo, material, d, w_fixed, h_fixed, mask, kTmpPos);
                         if (material.texture && material.texture.alphaTest) {
                             const alt = (-1 * (mask & ~0xff)) | (mask & 0xff);
-                            this.addQuad(geo, material, d, u, v, w, h, alt, kTmpPos);
+                            this.addQuad(geo, material, d, w_fixed, h_fixed, alt, kTmpPos);
                         }
                         nw = n;
                         for (let wx = 0; wx < w; wx++, nw += lv) {
@@ -253,7 +281,7 @@ class TerrainMesher {
                 const material = this.getMaterialData(id);
                 Vec3.set(kTmpPos, x * scale, height, z * scale);
                 const sw = scale * w, sh = scale * h, mask = id << 8;
-                this.addQuad(geo, material, 1, 2, 0, sw, sh, mask, kTmpPos);
+                this.addQuad(geo, material, 1, sw, sh, mask, kTmpPos);
                 for (let wi = 0; wi < w; wi++) {
                     let index = offset + stride * wi;
                     for (let hi = 0; hi < h; hi++, index += 2) {
@@ -307,7 +335,7 @@ class TerrainMesher {
                     const id = this.getBlockFaceMaterial(block, 2);
                     const mask = ((sign * id) << 8) | ao;
                     const material = this.getMaterialData(id);
-                    this.addQuad(geo, material, d, u, v, wi, hi, mask, kTmpPos);
+                    this.addQuad(geo, material, d, wi, hi, mask, kTmpPos);
                     const extra = w - 1;
                     offset += extra * sj;
                     j += extra;
@@ -315,7 +343,7 @@ class TerrainMesher {
             }
         }
     }
-    addQuad(geo, material, d, u, v, w, h, mask, pos) {
+    addQuad(geo, material, d, w, h, mask, pos) {
         const { num_quads } = geo;
         geo.allocateQuads(num_quads + 1);
         const { quads } = geo;
@@ -336,7 +364,7 @@ class TerrainMesher {
         quads[offset_color + 3] = color[3];
         let textureIndex = material.textureIndex;
         if (textureIndex === 0 && material.texture) {
-            textureIndex = this.renderer.atlas.addTexture(material.texture);
+            textureIndex = this.renderer.addTexture(material.texture);
             material.textureIndex = textureIndex;
             assert(textureIndex !== 0);
         }
