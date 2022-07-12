@@ -29,7 +29,6 @@ class Camera {
         const jerkx = Math.abs(dx) > 400 && Math.abs(dx / (this.last_dx || 1)) > 4;
         const jerky = Math.abs(dy) > 400 && Math.abs(dy / (this.last_dy || 1)) > 4;
         if (jerkx || jerky) {
-            console.log(`Smoothing out update: ${dx} x ${dy}`);
             const saved_x = this.last_dx;
             const saved_y = this.last_dy;
             this.last_dx = (dx + this.last_dx) / 2;
@@ -158,7 +157,10 @@ class Shader {
     compile(source, type) {
         const gl = this.gl;
         const result = nonnull(gl.createShader(type));
-        gl.shaderSource(result, `#version 300 es\n${source}`);
+        gl.shaderSource(result, `#version 300 es
+                             precision highp float;
+                             precision highp sampler2DArray;
+                             ${source}`);
         gl.compileShader(result);
         if (!gl.getShaderParameter(result, gl.COMPILE_STATUS)) {
             const info = gl.getShaderInfoLog(result);
@@ -194,7 +196,7 @@ class TextureAtlas {
         this.bind();
         const id = TEXTURE_2D_ARRAY;
         gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
+        gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_LINEAR);
     }
     addTexture(texture) {
         const index = ++this.nextResult;
@@ -341,9 +343,10 @@ class SpriteAtlas {
         const gl = this.gl;
         gl.bindTexture(TEXTURE_2D_ARRAY, texture);
         gl.texImage3D(TEXTURE_2D_ARRAY, 0, gl.RGBA, x, y, frames, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+        gl.generateMipmap(TEXTURE_2D_ARRAY);
         const id = TEXTURE_2D_ARRAY;
         gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_LINEAR);
         gl.texParameteri(id, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(id, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
@@ -545,6 +548,10 @@ class Mesh {
         }
         return false;
     }
+    dispose() {
+        if (this.shown())
+            this.removeFromMeshes();
+    }
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
     }
@@ -632,9 +639,6 @@ const kVoxelShader = `
     if (hide) gl_Position[3] = 0.0;
   }
 #split
-  precision highp float;
-  precision highp sampler2DArray;
-
   uniform int u_alphaTest;
   uniform vec3 u_fogColor;
   uniform float u_fogDepth;
@@ -690,10 +694,9 @@ class VoxelMesh extends Mesh {
         this.geo = geo;
     }
     dispose() {
+        super.dispose();
         this.destroyBuffers();
         this.mask = kDefaultMask;
-        if (this.shown())
-            this.removeFromMeshes();
     }
     draw(camera, planes) {
         const bounds = this.geo.getBounds();
@@ -784,9 +787,9 @@ class VoxelManager {
         const meshes = solid ? this.solid_meshes : this.water_meshes;
         return new VoxelMesh(this, meshes, geo);
     }
-    render(camera, planes, stats, overlay, move, wave) {
+    render(camera, planes, stats, overlay, move, wave, phase) {
         const { atlas, gl, shader } = this;
-        let drawn = 0;
+        let drawn = 0, total = 0;
         atlas.bind();
         shader.bind();
         const fog_color = overlay.getFogColor();
@@ -796,25 +799,31 @@ class VoxelManager {
         gl.uniform1i(shader.u_alphaTest, 1);
         gl.uniform3fv(shader.u_fogColor, fog_color);
         gl.uniform1f(shader.u_fogDepth, fog_depth);
-        // Opaque and alpha-tested voxel meshes.
-        for (const mesh of this.solid_meshes) {
-            if (mesh.draw(camera, planes))
-                drawn++;
+        if (phase === 0) {
+            // Opaque and alpha-tested voxel meshes.
+            for (const mesh of this.solid_meshes) {
+                if (mesh.draw(camera, planes))
+                    drawn++;
+            }
+            total = this.solid_meshes.length;
         }
-        // Alpha-blended voxel meshes. (Should we sort them?)
-        gl.depthMask(false);
-        gl.enable(gl.BLEND);
-        gl.disable(gl.CULL_FACE);
-        gl.uniform1i(shader.u_alphaTest, 0);
-        for (const mesh of this.water_meshes) {
-            if (mesh.draw(camera, planes))
-                drawn++;
+        else {
+            // Alpha-blended voxel meshes. (Should we sort them?)
+            gl.depthMask(false);
+            gl.enable(gl.BLEND);
+            gl.disable(gl.CULL_FACE);
+            gl.uniform1i(shader.u_alphaTest, 0);
+            for (const mesh of this.water_meshes) {
+                if (mesh.draw(camera, planes))
+                    drawn++;
+            }
+            total = this.water_meshes.length;
+            gl.enable(gl.CULL_FACE);
+            gl.disable(gl.BLEND);
+            gl.depthMask(true);
         }
-        gl.enable(gl.CULL_FACE);
-        gl.disable(gl.BLEND);
-        gl.depthMask(true);
         stats.drawn += drawn;
-        stats.total += this.solid_meshes.length + this.water_meshes.length;
+        stats.total += total;
     }
 }
 ;
@@ -837,9 +846,6 @@ const kSpriteShader = `
     gl_Position = u_transform * pos;
   }
 #split
-  precision highp float;
-  precision highp sampler2DArray;
-
   uniform float u_frame;
   uniform sampler2DArray u_texture;
   in vec2 v_uv;
@@ -868,10 +874,6 @@ class SpriteMesh extends Mesh {
         this.manager = manager;
         this.size = sprite.size;
         this.texture = manager.atlas.addSprite(sprite);
-    }
-    dispose() {
-        if (this.shown())
-            this.removeFromMeshes();
     }
     draw(camera, planes) {
         const bounds = this.manager.getBounds(this.size);
@@ -912,8 +914,8 @@ class SpriteManager {
         for (let i = 0; i < 8; i++) {
             const bound = result[i];
             bound[0] = (i & 1) ? half_size : -half_size;
-            bound[1] = (i & 2) ? half_size : -half_size;
-            bound[2] = (i & 4) ? size : 0;
+            bound[1] = (i & 2) ? size : 0;
+            bound[2] = (i & 4) ? half_size : -half_size;
         }
         return result;
     }
@@ -935,6 +937,102 @@ class SpriteManager {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
+const kShadowShader = `
+  uniform float u_size;
+  uniform mat4 u_transform;
+  out vec2 v_pos;
+
+  void main() {
+    int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID : 0);
+
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+    v_pos = vec2(w - 0.5, h - 0.5);
+
+    float x = 2.0 * u_size * v_pos[0];
+    float z = 2.0 * u_size * v_pos[1];
+    gl_Position = u_transform * vec4(x , 0, z, 1);
+  }
+#split
+  in vec2 v_pos;
+  out vec4 o_color;
+
+  void main() {
+    float radius = length(v_pos);
+    if (radius > 0.5) discard;
+    o_color = vec4(0, 0, 0, 0.5);
+  }
+`;
+class ShadowShader extends Shader {
+    constructor(gl) {
+        super(gl, kShadowShader);
+        this.u_size = this.getUniformLocation('u_size');
+        this.u_transform = this.getUniformLocation('u_transform');
+    }
+}
+;
+class ShadowMesh extends Mesh {
+    constructor(manager, meshes) {
+        super(manager, meshes);
+        this.size = 0;
+        this.manager = manager;
+    }
+    draw(camera, planes) {
+        const bounds = this.manager.getBounds(this.size);
+        if (this.cull(bounds, camera, planes))
+            return false;
+        const transform = camera.getTransformFor(this.position);
+        const { gl, shader } = this;
+        gl.uniform1f(shader.u_size, this.size);
+        gl.uniformMatrix4fv(shader.u_transform, false, transform);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
+        return true;
+    }
+    setPosition(x, y, z) {
+        Vec3.set(this.position, x, y, z);
+    }
+    setSize(size) {
+        this.size = size;
+    }
+}
+;
+class ShadowManager {
+    constructor(gl) {
+        this.gl = gl;
+        this.shader = new ShadowShader(gl);
+        this.bounds = Array(8).fill(null).map(() => Vec3.create());
+        this.meshes = [];
+    }
+    addMesh() {
+        return new ShadowMesh(this, this.meshes);
+    }
+    getBounds(size) {
+        const result = this.bounds;
+        const half_size = 0.5 * size;
+        for (let i = 0; i < 8; i++) {
+            const bound = result[i];
+            bound[0] = (i & 1) ? size : -size;
+            bound[2] = (i & 1) ? size : -size;
+        }
+        return result;
+    }
+    render(camera, planes, stats) {
+        const { gl, shader } = this;
+        let drawn = 0;
+        // All sprite meshes are alpha-blended.
+        shader.bind();
+        gl.enable(gl.BLEND);
+        for (const mesh of this.meshes) {
+            if (mesh.draw(camera, planes))
+                drawn++;
+        }
+        gl.disable(gl.BLEND);
+        stats.drawn += drawn;
+        stats.total += this.meshes.length;
+    }
+}
+;
+//////////////////////////////////////////////////////////////////////////////
 const kDefaultFogColor = [0.6, 0.8, 1.0];
 const kDefaultSkyColor = [0.6, 0.8, 1.0];
 const kScreenOverlayShader = `
@@ -944,8 +1042,6 @@ const kScreenOverlayShader = `
     gl_Position = vec4(a_position, 1);
   }
 #split
-  precision highp float;
-
   uniform vec4 u_color;
 
   out vec4 o_color;
@@ -1026,6 +1122,7 @@ class ScreenOverlay {
 ;
 ;
 ;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
@@ -1047,11 +1144,15 @@ class Renderer {
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl);
+        this.shadow_manager = new ShadowManager(gl);
         this.sprite_manager = new SpriteManager(gl);
         this.voxels_manager = new VoxelManager(gl);
     }
     addTexture(texture) {
         return this.voxels_manager.atlas.addTexture(texture);
+    }
+    addShadowMesh() {
+        return this.shadow_manager.addMesh();
     }
     addSpriteMesh(sprite) {
         return this.sprite_manager.addMesh(sprite);
@@ -1068,7 +1169,9 @@ class Renderer {
         const planes = camera.getCullingPlanes();
         const stats = { drawn: 0, total: 0 };
         this.sprite_manager.render(camera, planes, stats);
-        this.voxels_manager.render(camera, planes, stats, overlay, move, wave);
+        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
+        this.shadow_manager.render(camera, planes, stats);
+        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
         // Alpha-blended overlay.
         gl.enable(gl.BLEND);
         overlay.draw();

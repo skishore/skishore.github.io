@@ -5,7 +5,8 @@ import { kEmptyBlock, kWorldHeight } from './engine.js';
 import { kNoEntity } from './ecs.js';
 import { sweep } from './sweep.js';
 //////////////////////////////////////////////////////////////////////////////
-// The game code:
+const kSpriteSize = 1.25;
+//////////////////////////////////////////////////////////////////////////////
 class TypedEnv extends Env {
     constructor(id) {
         super(id);
@@ -15,6 +16,7 @@ class TypedEnv extends Env {
         this.movement = ents.registerComponent('movement', Movement(this));
         this.physics = ents.registerComponent('physics', Physics(this));
         this.meshes = ents.registerComponent('meshes', Meshes(this));
+        this.shadow = ents.registerComponent('shadow', Shadow(this));
         this.target = ents.registerComponent('camera-target', CameraTarget(this));
     }
 }
@@ -342,6 +344,40 @@ const Meshes = (env) => ({
         }
     },
 });
+;
+const Shadow = (env) => ({
+    init: () => ({ id: kNoEntity, index: 0, mesh: null, extent: 16, height: 0 }),
+    onRemove: (state) => { if (state.mesh)
+        state.mesh.dispose(); },
+    onRender: (dt, states) => {
+        for (const state of states) {
+            if (!state.mesh)
+                state.mesh = env.renderer.addShadowMesh();
+            const { x, y, z, w, h } = env.position.getX(state.id);
+            const fraction = 1 - (y - 0.5 * h - state.height) / state.extent;
+            const size = 0.5 * w * Math.max(0, Math.min(1, fraction));
+            state.mesh.setPosition(x, state.height + 0.01, z);
+            state.mesh.setSize(kSpriteSize * size);
+        }
+    },
+    onUpdate: (dt, states) => {
+        for (const state of states) {
+            const position = env.position.getX(state.id);
+            const x = Math.floor(position.x);
+            const y = Math.floor(position.y);
+            const z = Math.floor(position.z);
+            state.height = (() => {
+                for (let i = 0; i < state.extent; i++) {
+                    const h = y - i;
+                    const block = env.world.getBlock(x, h - 1, z);
+                    if (env.registry.solid[block])
+                        return h;
+                }
+                return 0;
+            })();
+        }
+    },
+});
 // CameraTarget signifies that the camera will follow an entity.
 const CameraTarget = (env) => ({
     init: () => ({ id: kNoEntity, index: 0 }),
@@ -388,12 +424,13 @@ const main = () => {
     position.z = 1;
     position.w = 0.7;
     position.h = 1.4;
-    const size = 1.25 * position.h;
     const mesh = env.meshes.add(player);
+    const size = kSpriteSize * position.h;
     const sprite = { url: 'images/player.png', size, x: 32, y: 32 };
     mesh.mesh = env.renderer.addSpriteMesh(sprite);
     env.physics.add(player);
     env.movement.add(player);
+    env.shadow.add(player);
     env.target.add(player);
     const texture = (x, y, alphaTest = false) => {
         return { alphaTest, url: 'images/rhodox-edited.png', x, y, w: 16, h: 16 };

@@ -21,6 +21,7 @@ const pack_indices = (xs) => {
 const kCachedGeometryA = Geometry.empty();
 const kCachedGeometryB = Geometry.empty();
 const kTmpPos = Vec3.create();
+const kTmpShape = [0, 0, 0];
 let kMaskData = new Int32Array();
 let kMaskUnion = new Int32Array();
 const kIndexOffsets = {
@@ -49,12 +50,12 @@ class TerrainMesher {
         this.getMaterialData = registry.getMaterialData.bind(registry);
         this.renderer = renderer;
     }
-    meshChunk(voxels, solid, water) {
+    meshChunk(voxels, heightmap, solid, water) {
         const solid_geo = solid ? solid.getGeometry() : kCachedGeometryA;
         const water_geo = water ? water.getGeometry() : kCachedGeometryB;
         solid_geo.clear();
         water_geo.clear();
-        this.computeChunkGeometry(solid_geo, water_geo, voxels);
+        this.computeChunkGeometry(solid_geo, water_geo, voxels, heightmap);
         return [
             this.buildMesh(solid_geo, solid, true),
             this.buildMesh(water_geo, water, false),
@@ -112,13 +113,23 @@ class TerrainMesher {
         }
         return this.renderer.addVoxelMesh(Geometry.clone(geo), solid);
     }
-    computeChunkGeometry(solid_geo, water_geo, voxels) {
+    computeChunkGeometry(solid_geo, water_geo, voxels, heightmap) {
         const { data, shape, stride } = voxels;
+        assert(heightmap.shape[0] === shape[0]);
+        assert(heightmap.shape[1] === shape[2]);
+        let max = 0;
+        const heightmap_data = heightmap.data;
+        for (let i = 0; i < heightmap_data.length; i++) {
+            max = Math.max(max, heightmap_data[i]);
+        }
+        kTmpShape[0] = shape[0];
+        kTmpShape[2] = shape[2];
+        kTmpShape[1] = Math.min(shape[1], max + 1);
         for (let d = 0; d < 3; d++) {
             const dir = d * 2;
             const v = (d === 1 ? 0 : 1);
             const u = 3 - d - v;
-            const ld = shape[d] - 1, lu = shape[u] - 2, lv = shape[v] - 2;
+            const ld = kTmpShape[d] - 1, lu = kTmpShape[u] - 2, lv = kTmpShape[v] - 2;
             const sd = stride[d], su = stride[u], sv = stride[v];
             const base = su + sv;
             // d is the dimension that the quad faces. A d of {0, 1, 2} corresponds
@@ -195,7 +206,7 @@ class TerrainMesher {
                             kMaskData[i] = 0;
                     }
                 }
-                else if (id === ld - 1) {
+                else if (id === shape[d] - 2) {
                     for (let i = 0; i < area; i++) {
                         if (kMaskData[i] < 0)
                             kMaskData[i] = 0;

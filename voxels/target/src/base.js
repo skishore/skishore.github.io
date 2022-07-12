@@ -270,6 +270,23 @@ const Mat4 = {
         d[15] = 1;
     },
 };
+class Tensor2 {
+    constructor(x, y) {
+        this.data = new Int16Array(x * y);
+        this.shape = [x, y];
+        this.stride = [1, x];
+    }
+    get(x, y) {
+        return this.data[this.index(x, y)];
+    }
+    set(x, y, value) {
+        this.data[this.index(x, y)] = value;
+    }
+    index(x, y) {
+        return x * this.stride[0] + y * this.stride[1];
+    }
+}
+;
 class Tensor3 {
     constructor(x, y, z) {
         this.data = new Int16Array(x * y * z);
@@ -288,5 +305,5 @@ class Tensor3 {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-export { assert, drop, nonnull, Mat4, Tensor3, Vec3 };
+export { assert, drop, nonnull, Mat4, Tensor2, Tensor3, Vec3 };
 //# sourceMappingURL=base.js.map
