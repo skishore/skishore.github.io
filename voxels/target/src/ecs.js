@@ -41,12 +41,12 @@ class ComponentStore {
         this.lookup.delete(entity);
         const popped = this.states.pop();
         assert(popped.index === this.states.length);
-        if (popped.id === entity)
-            return;
-        const index = state.index;
-        assert(index < this.states.length);
-        this.states[index] = popped;
-        popped.index = index;
+        if (popped.id !== entity) {
+            const index = state.index;
+            assert(index < this.states.length);
+            this.states[index] = popped;
+            popped.index = index;
+        }
         const callback = this.definition.onRemove;
         if (callback)
             callback(state);
@@ -68,15 +68,20 @@ class ComponentStore {
 class EntityComponentSystem {
     constructor() {
         this.last = 0;
+        this.reusable = [];
         this.components = new Map();
         this.onRenders = [];
         this.onUpdates = [];
     }
     addEntity() {
+        if (this.reusable.length > 0) {
+            return this.reusable.pop();
+        }
         return this.last = (this.last + 1);
     }
     removeEntity(entity) {
         this.components.forEach(x => x.remove(entity));
+        this.reusable.push(entity);
     }
     registerComponent(component, definition) {
         const exists = this.components.has(component);

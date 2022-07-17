@@ -614,7 +614,7 @@ const kVoxelShader = `
     float w = float(((index + 1) & 3) >> 1);
     float h = float(((index + 0) & 3) >> 1);
 
-    v_uvw = vec3(0, 0, a_texture);
+    v_uvw = vec3(0.0, 0.0, a_texture);
     const float kTextureBuffer = 0.01;
     if (dim == 2) {
       v_uvw[0] = (a_size[0] - kTextureBuffer) * w * -a_dir;
@@ -651,7 +651,7 @@ const kVoxelShader = `
   void main() {
     float depth = u_fogDepth * gl_FragCoord.w;
     float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
-    vec3 index = v_uvw + vec3(v_move, v_move, 0);
+    vec3 index = v_uvw + vec3(v_move, v_move, 0.0);
     vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
     if (u_alphaTest != 0) {
@@ -830,6 +830,7 @@ class VoxelManager {
 //////////////////////////////////////////////////////////////////////////////
 const kSpriteShader = `
   uniform float u_size;
+  uniform vec4 u_stuv;
   uniform vec2 u_billboard;
   uniform mat4 u_transform;
   out vec2 v_uv;
@@ -839,10 +840,13 @@ const kSpriteShader = `
 
     float w = float(((index + 1) & 3) >> 1);
     float h = float(((index + 0) & 3) >> 1);
-    v_uv = vec2(w, 1.0 - h);
+
+    float u = u_stuv[0] + u_stuv[2] * w;
+    float v = u_stuv[1] + u_stuv[3] * (1.0 - h);
+    v_uv = vec2(u, v);
 
     float x = u_size * (w - 0.5);
-    vec4 pos = vec4(x * u_billboard[0], u_size * h, x * u_billboard[1], 1);
+    vec4 pos = vec4(x * u_billboard[0], u_size * h, x * u_billboard[1], 1.0);
     gl_Position = u_transform * pos;
   }
 #split
@@ -861,6 +865,7 @@ class SpriteShader extends Shader {
     constructor(gl) {
         super(gl, kSpriteShader);
         this.u_size = this.getUniformLocation('u_size');
+        this.u_stuv = this.getUniformLocation('u_stuv');
         this.u_billboard = this.getUniformLocation('u_billboard');
         this.u_transform = this.getUniformLocation('u_transform');
         this.u_frame = this.getUniformLocation('u_frame');
@@ -873,6 +878,9 @@ class SpriteMesh extends Mesh {
         this.frame = 0;
         this.manager = manager;
         this.size = sprite.size;
+        this.stuv = new Float32Array(4);
+        this.stuv[2] = 1;
+        this.stuv[3] = 1;
         this.texture = manager.atlas.addSprite(sprite);
     }
     draw(camera, planes) {
@@ -883,6 +891,7 @@ class SpriteMesh extends Mesh {
         const { gl, shader } = this;
         gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
         gl.uniform1f(shader.u_size, this.size);
+        gl.uniform4fv(shader.u_stuv, this.stuv);
         gl.uniform1f(shader.u_frame, this.frame);
         gl.uniformMatrix4fv(shader.u_transform, false, transform);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
@@ -893,6 +902,13 @@ class SpriteMesh extends Mesh {
     }
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
+    }
+    setSTUV(s, t, u, v) {
+        const stuv = this.stuv;
+        stuv[0] = s;
+        stuv[1] = t;
+        stuv[2] = u;
+        stuv[3] = v;
     }
 }
 ;
@@ -951,7 +967,7 @@ const kShadowShader = `
 
     float x = 2.0 * u_size * v_pos[0];
     float z = 2.0 * u_size * v_pos[1];
-    gl_Position = u_transform * vec4(x , 0, z, 1);
+    gl_Position = u_transform * vec4(x, 0.0, z, 1.0);
   }
 #split
   in vec2 v_pos;
@@ -960,7 +976,7 @@ const kShadowShader = `
   void main() {
     float radius = length(v_pos);
     if (radius > 0.5) discard;
-    o_color = vec4(0, 0, 0, 0.5);
+    o_color = vec4(0.0, 0.0, 0.0, 0.5);
   }
 `;
 class ShadowShader extends Shader {
@@ -1036,10 +1052,11 @@ class ShadowManager {
 const kDefaultFogColor = [0.6, 0.8, 1.0];
 const kDefaultSkyColor = [0.6, 0.8, 1.0];
 const kScreenOverlayShader = `
-  in vec3 a_position;
-
   void main() {
-    gl_Position = vec4(a_position, 1);
+    int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID : 0);
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+    gl_Position = vec4(2.0 * w - 1.0, 2.0 * h - 1.0, 0.0, 1.0);
   }
 #split
   uniform vec4 u_color;
@@ -1054,7 +1071,6 @@ class ScreenOverlayShader extends Shader {
     constructor(gl) {
         super(gl, kScreenOverlayShader);
         this.u_color = this.getUniformLocation('u_color');
-        this.a_position = this.getAttribLocation('a_position');
     }
 }
 ;
@@ -1064,24 +1080,18 @@ class ScreenOverlay {
         this.fog_color = new Float32Array(kDefaultFogColor);
         this.gl = gl;
         this.shader = new ScreenOverlayShader(gl);
-        this.vertices = Float32Array.from([
-            1, 1, 0, -1, 1, 0, -1, -1, 0,
-            1, 1, 0, -1, -1, 0, 1, -1, 0
-        ]);
-        this.vao = null;
-        this.buffer = null;
     }
     draw() {
         if (this.color[3] === 1)
             return;
-        this.prepareBuffers();
         this.shader.bind();
         const gl = this.gl;
-        gl.bindVertexArray(this.vao);
+        gl.enable(gl.BLEND);
         gl.disable(gl.DEPTH_TEST);
         gl.uniform4fv(this.shader.u_color, this.color);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
         gl.enable(gl.DEPTH_TEST);
+        gl.disable(gl.BLEND);
     }
     getFogColor() {
         return this.fog_color;
@@ -1099,22 +1109,6 @@ class ScreenOverlay {
         else {
             this.fog_color.set(kDefaultFogColor);
         }
-    }
-    prepareBuffers() {
-        if (this.vao)
-            return;
-        const gl = this.gl;
-        this.vao = nonnull(gl.createVertexArray());
-        gl.bindVertexArray(this.vao);
-        const location = this.shader.a_position;
-        if (location === null)
-            return;
-        const buffer = nonnull(gl.createBuffer());
-        gl.bindBuffer(ARRAY_BUFFER, buffer);
-        gl.bufferData(ARRAY_BUFFER, this.vertices, gl.STATIC_DRAW);
-        gl.enableVertexAttribArray(location);
-        gl.vertexAttribPointer(location, 3, gl.FLOAT, false, 0, 0);
-        this.buffer = buffer;
     }
 }
 ;
@@ -1172,10 +1166,7 @@ class Renderer {
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
         this.shadow_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
-        // Alpha-blended overlay.
-        gl.enable(gl.BLEND);
         overlay.draw();
-        gl.disable(gl.BLEND);
         return `${this.voxels_manager.allocator.stats()}\r\n` +
             `Draw calls: ${stats.drawn} / ${stats.total}`;
     }

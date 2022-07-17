@@ -1,17 +1,28 @@
-import { makeNoise2D } from '../lib/open-simplex-2d.js';
 import { Vec3 } from './base.js';
 import { Env } from './engine.js';
 import { kEmptyBlock, kWorldHeight } from './engine.js';
 import { kNoEntity } from './ecs.js';
 import { sweep } from './sweep.js';
+import { getHeight, loadChunk, loadFrontier } from './worldgen.js';
 //////////////////////////////////////////////////////////////////////////////
-const kSpriteSize = 1.25;
+const kNumParticles = 16;
+const kMaxNumParticles = 64;
+const kWaterDelay = 200;
+const kWaterDisplacements = [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1],
+    [-1, 0, 0],
+    [0, 0, -1],
+];
 //////////////////////////////////////////////////////////////////////////////
 class TypedEnv extends Env {
     constructor(id) {
         super(id);
-        this.addedBlock = kEmptyBlock;
+        this.particles = 0;
+        this.blocks = null;
         const ents = this.entities;
+        this.lifetime = ents.registerComponent('lifetime', Lifetime);
         this.position = ents.registerComponent('position', Position);
         this.movement = ents.registerComponent('movement', Movement(this));
         this.physics = ents.registerComponent('physics', Physics(this));
@@ -21,6 +32,47 @@ class TypedEnv extends Env {
     }
 }
 ;
+const hasWaterNeighbor = (env, water, p) => {
+    for (const d of kWaterDisplacements) {
+        const block = env.world.getBlock(d[0] + p[0], d[1] + p[1], d[2] + p[2]);
+        if (block === water)
+            return true;
+    }
+    return false;
+};
+const flowWater = (env, water, points) => {
+    const next = [];
+    const visited = new Set();
+    for (const p of points) {
+        const block = env.world.getBlock(p[0], p[1], p[2]);
+        if (block !== kEmptyBlock || !hasWaterNeighbor(env, water, p))
+            continue;
+        env.world.setBlock(p[0], p[1], p[2], water);
+        for (const d of kWaterDisplacements) {
+            const n = [p[0] - d[0], p[1] - d[1], p[2] - d[2]];
+            const key = `${n[0]}-${n[1]}-${n[2]}`;
+            if (visited.has(key))
+                continue;
+            visited.add(key);
+            next.push(n);
+        }
+    }
+    if (next.length === 0)
+        return;
+    setTimeout(() => flowWater(env, water, next), kWaterDelay);
+};
+;
+const Lifetime = {
+    init: () => ({ id: kNoEntity, index: 0, lifetime: 0, cleanup: null }),
+    onUpdate: (dt, states) => {
+        dt = dt / 1000;
+        for (const state of states) {
+            state.lifetime -= dt;
+            if (state.lifetime < 0 && state.cleanup)
+                state.cleanup();
+        }
+    },
+};
 ;
 const Position = {
     init: () => ({ id: kNoEntity, index: 0, x: 0, y: 0, z: 0, h: 0, w: 0 }),
@@ -133,8 +185,9 @@ const runPhysics = (env, dt, state) => {
         tryAutoStepping(dt, state, kTmpMin, kTmpMax, check);
     }
     for (let i = 0; i < 3; i++) {
-        if (state.resting[i] !== 0)
-            state.vel[i] = 0;
+        if (state.resting[i] === 0)
+            continue;
+        state.vel[i] = -state.restitution * state.vel[i];
     }
 };
 const Physics = (env) => ({
@@ -149,14 +202,17 @@ const Physics = (env) => ({
         resting: Vec3.create(),
         inFluid: false,
         friction: 0,
+        restitution: 0,
         mass: 1,
-        autoStep: 0.25,
+        autoStep: 0,
     }),
     onAdd: (state) => {
         setPhysicsFromPosition(env.position.getX(state.id), state);
     },
     onRemove: (state) => {
-        setPositionFromPhysics(env.position.getX(state.id), state);
+        const position = env.position.get(state.id);
+        if (position)
+            setPositionFromPhysics(position, state);
     },
     onRender: (dt, states) => {
         for (const state of states) {
@@ -210,13 +266,54 @@ const handleRunning = (dt, state, body, grounded) => {
     Vec3.scale(kTmpPush, kTmpPush, Math.min(bound, input) / length);
     Vec3.add(body.forces, body.forces, kTmpPush);
 };
+const generateParticles = (env, block, x, y, z, side) => {
+    const adjusted = side === 2 || side === 3 ? 0 : side;
+    const material = env.registry.getBlockFaceMaterial(block, adjusted);
+    const data = env.registry.getMaterialData(material);
+    if (!data.texture)
+        return;
+    const count = Math.min(kNumParticles, kMaxNumParticles - env.particles);
+    env.particles += count;
+    for (let i = 0; i < count; i++) {
+        const particle = env.entities.addEntity();
+        const position = env.position.add(particle);
+        const side = Math.floor(3 * Math.random() + 1) / 16;
+        position.x = x + (1 - side) * Math.random() + side / 2;
+        position.y = y + (1 - side) * Math.random() + side / 2;
+        position.z = z + (1 - side) * Math.random() + side / 2;
+        position.w = position.h = side;
+        const kParticleSpeed = 8;
+        const body = env.physics.add(particle);
+        body.impulses[0] = kParticleSpeed * (Math.random() - 0.5);
+        body.impulses[1] = kParticleSpeed * Math.random();
+        body.impulses[2] = kParticleSpeed * (Math.random() - 0.5);
+        body.friction = 10;
+        body.restitution = 0.5;
+        const size = position.h;
+        const mesh = env.meshes.add(particle);
+        const sprite = { url: 'images/rhodox-edited.png', size, x: 16, y: 16 };
+        mesh.mesh = env.renderer.addSpriteMesh(sprite);
+        mesh.mesh.setFrame(data.texture.x + 16 * data.texture.y);
+        const epsilon = 0.01;
+        const s = Math.floor(16 * (1 - side) * Math.random()) / 16;
+        const t = Math.floor(16 * (1 - side) * Math.random()) / 16;
+        const uv = side - 2 * epsilon;
+        mesh.mesh.setSTUV(s + epsilon, t + epsilon, uv, uv);
+        const lifetime = env.lifetime.add(particle);
+        lifetime.lifetime = 1.0 * Math.random() + 0.5;
+        lifetime.cleanup = () => {
+            env.entities.removeEntity(particle);
+            env.particles--;
+        };
+    }
+};
 const tryToModifyBlock = (env, body, add) => {
     const target = env.getTargetedBlock();
     if (target === null)
         return;
+    const side = env.getTargetedBlockSide();
     Vec3.copy(kTmpPos, target);
     if (add) {
-        const side = env.getTargetedBlockSide();
         kTmpPos[side >> 1] += (side & 1) ? -1 : 1;
         let intersect = true;
         const { max, min } = body;
@@ -229,8 +326,18 @@ const tryToModifyBlock = (env, body, add) => {
         if (intersect)
             return;
     }
-    const block = add ? env.addedBlock : kEmptyBlock;
-    env.world.setBlock(kTmpPos[0], kTmpPos[1], kTmpPos[2], block);
+    const x = kTmpPos[0], y = kTmpPos[1], z = kTmpPos[2];
+    const old_block = add ? kEmptyBlock : env.world.getBlock(x, y, z);
+    const block = add && env.blocks ? env.blocks.dirt : kEmptyBlock;
+    env.world.setBlock(x, y, z, block);
+    const new_block = add ? kEmptyBlock : env.world.getBlock(x, y, z);
+    if (env.blocks) {
+        const water = env.blocks.water;
+        setTimeout(() => flowWater(env, water, [[x, y, z]]), kWaterDelay);
+    }
+    if (old_block !== kEmptyBlock && old_block !== new_block) {
+        generateParticles(env, old_block, x, y, z, side);
+    }
 };
 const runMovement = (env, dt, state) => {
     dt = dt / 1000;
@@ -327,6 +434,8 @@ const Meshes = (env) => ({
         for (const state of states) {
             if (!state.mesh)
                 return;
+            if (!env.movement.get(state.id))
+                return;
             const body = env.physics.get(state.id);
             if (!body)
                 return;
@@ -357,7 +466,7 @@ const Shadow = (env) => ({
             const fraction = 1 - (y - 0.5 * h - state.height) / state.extent;
             const size = 0.5 * w * Math.max(0, Math.min(1, fraction));
             state.mesh.setPosition(x, state.height + 0.01, z);
-            state.mesh.setSize(kSpriteSize * size);
+            state.mesh.setSize(size);
         }
     },
     onUpdate: (dt, states) => {
@@ -394,38 +503,32 @@ const CameraTarget = (env) => ({
         }
     },
 });
-// Noise helpers:
-let noise_counter = (Math.random() * (1 << 30)) | 0;
-const perlin2D = () => {
-    return makeNoise2D(noise_counter++);
-};
-const fractalPerlin2D = (amplitude, radius, growth, count) => {
-    const factor = Math.pow(2, growth);
-    const components = new Array(count).fill(null).map(perlin2D);
-    return (x, y) => {
-        let result = 0;
-        let r = radius;
-        let a = amplitude;
-        for (const component of components) {
-            result += a * component(x / r, y / r);
-            a *= factor;
-            r *= 2;
-        }
-        return result;
-    };
-};
 // Putting it all together:
+const safeHeight = (position) => {
+    const radius = 0.5 * (position.w + 1);
+    const ax = Math.floor(position.x - radius);
+    const az = Math.floor(position.z - radius);
+    const bx = Math.ceil(position.x + radius);
+    const bz = Math.ceil(position.z + radius);
+    let height = 0;
+    for (let x = ax; x <= bx; x++) {
+        for (let z = az; z <= bz; z++) {
+            height = Math.max(height, getHeight(x, z));
+        }
+    }
+    return height + 0.5 * (position.h + 1);
+};
 const main = () => {
     const env = new TypedEnv('container');
     const player = env.entities.addEntity();
     const position = env.position.add(player);
     position.x = 1;
-    position.y = kWorldHeight;
     position.z = 1;
-    position.w = 0.7;
-    position.h = 1.4;
+    position.w = 0.6;
+    position.h = 0.8;
+    position.y = safeHeight(position);
+    const size = 1.25 * position.h;
     const mesh = env.meshes.add(player);
-    const size = kSpriteSize * position.h;
     const sprite = { url: 'images/player.png', size, x: 32, y: 32 };
     mesh.mesh = env.renderer.addSpriteMesh(sprite);
     env.physics.add(player);
@@ -444,164 +547,30 @@ const main = () => {
         ['dirt', 2, 0],
         ['grass', 0, 0],
         ['grass-side', 3, 0],
+        ['rock', 1, 0],
         ['sand', 0, 11],
         ['snow', 2, 4],
-        ['stone', 1, 0],
         ['trunk', 5, 1],
         ['trunk-side', 4, 1],
     ];
     for (const [name, x, y] of textures) {
         registry.addMaterialOfTexture(name, texture(x, y));
     }
-    const rock = registry.addBlock(['stone'], true);
-    const dirt = registry.addBlock(['dirt'], true);
-    const sand = registry.addBlock(['sand'], true);
-    const snow = registry.addBlock(['snow'], true);
-    const grass = registry.addBlock(['grass', 'dirt', 'grass-side'], true);
-    const bedrock = registry.addBlock(['bedrock'], true);
-    const water = registry.addBlock(['water', 'blue', 'blue'], false);
-    const trunk = registry.addBlock(['trunk', 'trunk-side'], true);
-    const leaves = registry.addBlock(['leaves'], true);
-    env.addedBlock = dirt;
-    // Composite noise functions.
-    const minetest_noise_2d = (offset, scale, spread, octaves, persistence, lacunarity) => {
-        const components = new Array(octaves).fill(null).map(perlin2D);
-        return (x, y) => {
-            let f = 1, g = 1;
-            let result = 0;
-            x /= spread;
-            y /= spread;
-            for (let i = 0; i < octaves; i++) {
-                result += g * components[i](x * f, y * f);
-                f *= lacunarity;
-                g *= persistence;
-            }
-            return scale * result + offset;
-        };
+    const blocks = {
+        bedrock: registry.addBlock(['bedrock'], true),
+        dirt: registry.addBlock(['dirt'], true),
+        grass: registry.addBlock(['grass', 'dirt', 'grass-side'], true),
+        leaves: registry.addBlock(['leaves'], true),
+        rock: registry.addBlock(['rock'], true),
+        sand: registry.addBlock(['sand'], true),
+        snow: registry.addBlock(['snow'], true),
+        trunk: registry.addBlock(['trunk', 'trunk-side'], true),
+        water: registry.addBlock(['water', 'blue', 'blue'], false),
     };
-    const ridgeNoise = (octaves, persistence, scale) => {
-        const components = new Array(4).fill(null).map(perlin2D);
-        return (x, z) => {
-            let result = 0, a = 1, s = scale;
-            for (const component of components) {
-                result += (1 - Math.abs(component(x * s, z * s))) * a;
-                a *= persistence;
-                s *= 2;
-            }
-            return result;
-        };
-    };
-    const mgv7_np_cliff_select = minetest_noise_2d(0, 1, 512, 4, 0.7, 2.0);
-    const mgv7_np_mountain_select = minetest_noise_2d(0, 1, 512, 4, 0.7, 2.0);
-    const mgv7_np_terrain_ground = minetest_noise_2d(2, 8, 512, 6, 0.6, 2.0);
-    const mgv7_np_terrain_cliff = minetest_noise_2d(8, 16, 512, 6, 0.6, 2.0);
-    const mgv7_mountain_ridge = ridgeNoise(8, 0.5, 0.002);
-    // Cave generation.
-    const kIslandRadius = 1024;
-    const kSeaLevel = (kWorldHeight / 4) | 0;
-    const kCaveLevels = 3;
-    const kCaveDeltaY = 0;
-    const kCaveHeight = 8;
-    const kCaveRadius = 16;
-    const kCaveCutoff = 0.25;
-    const kCaveWaveHeight = 16;
-    const kCaveWaveRadius = 256;
-    const cave_noises = new Array(2 * kCaveLevels).fill(null).map(perlin2D);
-    const carve_caves = (x, z, column) => {
-        const start = kSeaLevel - kCaveDeltaY * (kCaveLevels - 1) / 2;
-        for (let i = 0; i < kCaveLevels; i++) {
-            const carver_noise = cave_noises[2 * i + 0];
-            const height_noise = cave_noises[2 * i + 1];
-            const carver = carver_noise(x / kCaveRadius, z / kCaveRadius);
-            if (carver > kCaveCutoff) {
-                const dy = start + i * kCaveDeltaY;
-                const height = height_noise(x / kCaveWaveRadius, z / kCaveWaveRadius);
-                const offset = (dy + kCaveWaveHeight * height) | 0;
-                const blocks = ((carver - kCaveCutoff) * kCaveHeight) | 0;
-                for (let i = 0; i < 2 * blocks + 3; i++) {
-                    column.overwrite(kEmptyBlock, offset + i - blocks);
-                }
-            }
-        }
-    };
-    // Tree generation.
-    const hash_fnv32 = (k) => {
-        let result = 2166136261;
-        for (let i = 0; i < 4; i++) {
-            result ^= (k & 255);
-            result *= 16777619;
-            k = k >> 8;
-        }
-        return result;
-    };
-    const kMask = (1 << 15) - 1;
-    const has_tree = (x, z) => {
-        const base = hash_fnv32(((x & kMask) << 15) | (z & kMask));
-        return (base & 63) <= 3;
-    };
-    // Terrain generation.
-    const loadChunk = (x, z, column, lod) => {
-        const base = Math.sqrt(x * x + z * z) / kIslandRadius;
-        const falloff = 16 * base * base;
-        if (falloff >= kSeaLevel)
-            return column.push(water, kSeaLevel);
-        const cliff_select = mgv7_np_cliff_select(x, z);
-        const cliff_x = Math.max(Math.min(16 * Math.abs(cliff_select) - 4, 1), 0);
-        const mountain_select = mgv7_np_mountain_select(x, z);
-        const mountain_x = Math.sqrt(Math.max(8 * mountain_select, 0));
-        const cliff = cliff_x - mountain_x;
-        const mountain = -cliff;
-        const height_ground = mgv7_np_terrain_ground(x, z);
-        const height_cliff = cliff > 0
-            ? mgv7_np_terrain_cliff(x, z)
-            : height_ground;
-        const height_mountain = mountain > 0
-            ? height_ground + 64 * Math.pow((mgv7_mountain_ridge(x, z) - 1.25), 1.5)
-            : height_ground;
-        const height = (() => {
-            if (height_mountain > height_ground) {
-                return height_mountain * mountain + height_ground * (1 - mountain);
-            }
-            else if (height_cliff > height_ground) {
-                return height_cliff * cliff + height_ground * (1 - cliff);
-            }
-            return height_ground;
-        })();
-        const truncated = (height - falloff) | 0;
-        const abs_height = truncated + kSeaLevel;
-        const tile = (() => {
-            if (truncated < -1)
-                return dirt;
-            if (height_mountain > height_ground) {
-                const base = height - (72 - 8 * mountain);
-                return base > 0 ? snow : rock;
-            }
-            if (height_cliff > height_ground)
-                return dirt;
-            return truncated < 1 ? sand : grass;
-        })();
-        if (lod) {
-            column.push(tile, abs_height);
-            column.push(water, kSeaLevel);
-            return;
-        }
-        if (tile === snow) {
-            const base = height - (72 - 8 * mountain);
-            const depth = Math.min(3, Math.floor(base / 8) + 1);
-            column.push(rock, abs_height - depth);
-        }
-        else if (tile !== rock) {
-            column.push(rock, abs_height - 4);
-            column.push(dirt, abs_height - 1);
-        }
-        column.push(tile, abs_height);
-        column.push(water, kSeaLevel);
-        if (tile === grass && has_tree(x, z)) {
-            column.push(leaves, abs_height + 1);
-        }
-        carve_caves(x, z, column);
-    };
-    env.world.setLoader(bedrock, (x, z, column) => loadChunk(x, z, column, false), (x, z, column) => loadChunk(x, z, column, true));
+    env.blocks = blocks;
+    const loadChunkFn = loadChunk(blocks);
+    const loadFrontierFn = loadFrontier(blocks);
+    env.world.setLoader(blocks.bedrock, loadChunkFn, loadFrontierFn);
     env.refresh();
 };
 window.onload = main;

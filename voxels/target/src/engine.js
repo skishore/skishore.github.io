@@ -1097,10 +1097,20 @@ class Env {
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;
         const xi = Math.floor(x), zi = Math.floor(z);
-        const yi = Math.floor(y + wave);
-        const yf = y + wave - yi;
+        let yi = Math.floor(y), yf = y - yi;
+        // We should only apply wave if the block above a liquid is an air block.
+        const new_block = (() => {
+            const below = this.getRenderBlock(xi, yi, zi);
+            if (below === kEmptyBlock || yf + wave <= 1)
+                return below;
+            const above = this.getRenderBlock(xi, yi + 1, zi);
+            if (above !== kEmptyBlock)
+                return below;
+            yi += 1;
+            yf += wave - 1;
+            return kEmptyBlock;
+        })();
         const old_block = this.cameraBlock;
-        const new_block = this.getRenderBlock(xi, yi, zi);
         this.cameraBlock = new_block;
         const max = kMinZUpperBound;
         const min = kMinZLowerBound;
