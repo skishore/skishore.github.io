@@ -427,7 +427,9 @@ const Meshes = (env) => ({
             if (!state.mesh)
                 continue;
             const { x, y, z, h } = env.position.getX(state.id);
+            const lit = y >= env.world.getHeight(Math.floor(x), Math.floor(z));
             state.mesh.setPosition(x, y - h / 2, z);
+            state.mesh.setLight(lit ? 1 : 0.64);
         }
     },
     onUpdate: (dt, states) => {

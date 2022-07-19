@@ -247,17 +247,20 @@ class Timing {
 ;
 class Column {
     constructor() {
-        this.decorations = [];
-        this.data = new Uint16Array(2 * kWorldHeight);
         this.last = 0;
         this.size = 0;
+        this.reference_size = 0;
+        this.decorations = [];
+        this.data = new Int16Array(2 * kWorldHeight);
+        this.mismatches = new Int16Array(kWorldHeight);
+        this.reference_data = new Int16Array(2 * kWorldHeight);
     }
     clear() {
         this.decorations.length = 0;
         this.last = 0;
         this.size = 0;
     }
-    fillChunk(x, z, chunk) {
+    fillChunk(x, z, chunk, first) {
         let last = 0;
         for (let i = 0; i < this.size; i++) {
             const offset = 2 * i;
@@ -271,6 +274,15 @@ class Column {
             const level = this.decorations[i + 1];
             chunk.setColumn(x, z, level, 1, block);
         }
+        this.detectEquiLevelChanges(first);
+    }
+    fillEquiLevels(equilevels) {
+        let current = 0;
+        const mismatches = this.mismatches;
+        for (let i = 0; i < kWorldHeight; i++) {
+            current += mismatches[i];
+            equilevels[i] = (current === 0 ? 1 : 0);
+        }
     }
     overwrite(block, y) {
         if (!(0 <= y && y < kWorldHeight))
@@ -279,9 +291,10 @@ class Column {
         this.decorations.push(y);
     }
     push(block, height) {
+        height = Math.min(height, kWorldHeight);
         if (height <= this.last)
             return;
-        this.last = Math.min(height, kWorldHeight);
+        this.last = height;
         const offset = 2 * this.size;
         this.data[offset + 0] = block;
         this.data[offset + 1] = this.last;
@@ -295,6 +308,48 @@ class Column {
     }
     getSize() {
         return this.size;
+    }
+    detectEquiLevelChanges(first) {
+        if (this.last < kWorldHeight) {
+            const offset = 2 * this.size;
+            this.data[offset + 0] = kEmptyBlock;
+            this.data[offset + 1] = kWorldHeight;
+            this.size++;
+        }
+        if (first) {
+            this.mismatches.fill(0);
+            this.reference_data.set(this.data);
+            this.reference_size = this.size;
+            return;
+        }
+        let matched = true;
+        let di = 0, ri = 0;
+        let d_start = 0, r_start = 0;
+        while (di < this.size && ri < this.reference_size) {
+            const d_offset = 2 * di;
+            const d_block = this.data[d_offset + 0];
+            const d_limit = this.data[d_offset + 1];
+            const r_offset = 2 * ri;
+            const r_block = this.reference_data[r_offset + 0];
+            const r_limit = this.reference_data[r_offset + 1];
+            if (matched !== (d_block === r_block)) {
+                const height = Math.max(d_start, r_start);
+                this.mismatches[height] += matched ? 1 : -1;
+                matched = !matched;
+            }
+            if (d_limit <= r_limit) {
+                d_start = d_limit;
+                di++;
+            }
+            if (r_limit <= d_limit) {
+                r_start = r_limit;
+                ri++;
+            }
+        }
+        assert(di === this.size);
+        assert(ri === this.reference_size);
+        assert(d_start === kWorldHeight);
+        assert(r_start === kWorldHeight);
     }
 }
 ;
@@ -410,6 +465,7 @@ class Chunk {
         this.world = world;
         this.voxels = new Tensor3(kChunkWidth, kWorldHeight, kChunkWidth);
         this.heightmap = new Tensor2(kChunkWidth, kChunkWidth);
+        this.equilevels = new Int16Array(kWorldHeight);
         this.load(loader);
     }
     dispose() {
@@ -426,11 +482,12 @@ class Chunk {
         neighbor(0, -1);
     }
     getBlock(x, y, z) {
-        const voxels = this.voxels;
-        if (!voxels)
-            return kEmptyBlock;
         const xm = x & kChunkMask, zm = z & kChunkMask;
-        return voxels.get(xm, y, zm);
+        return this.voxels.get(xm, y, zm);
+    }
+    getHeight(x, z) {
+        const xm = x & kChunkMask, zm = z & kChunkMask;
+        return this.heightmap.get(xm, zm);
     }
     setBlock(x, y, z, block) {
         const voxels = this.voxels;
@@ -442,6 +499,7 @@ class Chunk {
         voxels.data[index] = block;
         this.dirty = true;
         this.updateHeightmap(xm, zm, index, y, 1, block);
+        this.equilevels[y] = 0;
         const neighbor = (x, y, z) => {
             const { cx, cz } = this;
             const chunk = this.world.chunks.get(x + cx, z + cz);
@@ -483,11 +541,13 @@ class Chunk {
         const dz = cz << kChunkBits;
         for (let x = 0; x < kChunkWidth; x++) {
             for (let z = 0; z < kChunkWidth; z++) {
+                const first = x + z === 0;
                 loader(x + dx, z + dz, column);
-                column.fillChunk(x + dx, z + dz, this);
+                column.fillChunk(x + dx, z + dz, this, first);
                 column.clear();
             }
         }
+        column.fillEquiLevels(this.equilevels);
         const neighbor = (x, z) => {
             const chunk = this.world.chunks.get(x + cx, z + cz);
             if (!chunk)
@@ -705,7 +765,7 @@ class Frontier {
         }
         assert(kChunkWidth % kFrontierLOD === 0);
         const side = kChunkWidth / kFrontierLOD;
-        const size = (side + 2) * (side + 2) * 2;
+        const size = 3 * (side + 2) * (side + 2);
         this.solid_heightmap = new Uint32Array(size);
         this.water_heightmap = new Uint32Array(size);
         this.side = side;
@@ -790,19 +850,22 @@ class Frontier {
             for (let i = 0; i < side; i++) {
                 for (let j = 0; j < side; j++) {
                     loadFrontier(ax + i * lod, az + j * lod, column);
-                    const offset = 2 * ((i + 1) + (j + 1) * (side + 2));
+                    const offset = 3 * ((i + 1) + (j + 1) * (side + 2));
                     const size = column.getSize();
                     const last_block = column.getNthBlock(size - 1, bedrock);
                     const last_level = column.getNthLevel(size - 1);
                     if (registry.solid[last_block]) {
                         solid_heightmap[offset + 0] = last_block;
                         solid_heightmap[offset + 1] = last_level;
+                        solid_heightmap[offset + 2] = 1;
                         water_heightmap[offset + 0] = 0;
                         water_heightmap[offset + 1] = 0;
+                        water_heightmap[offset + 2] = 0;
                     }
                     else {
                         water_heightmap[offset + 0] = last_block;
                         water_heightmap[offset + 1] = last_level;
+                        water_heightmap[offset + 2] = 1;
                         for (let i = size; i > 0; i--) {
                             const block = column.getNthBlock(i - 2, bedrock);
                             const level = column.getNthLevel(i - 2);
@@ -810,6 +873,7 @@ class Frontier {
                                 continue;
                             solid_heightmap[offset + 0] = block;
                             solid_heightmap[offset + 1] = level;
+                            solid_heightmap[offset + 2] = 0;
                             break;
                         }
                     }
@@ -880,6 +944,11 @@ class World {
         const cx = x >> kChunkBits, cz = z >> kChunkBits;
         const chunk = this.chunks.get(cx, cz);
         return chunk ? chunk.getBlock(x, y, z) : kUnknownBlock;
+    }
+    getHeight(x, z) {
+        const cx = x >> kChunkBits, cz = z >> kChunkBits;
+        const chunk = this.chunks.get(cx, cz);
+        return chunk ? chunk.getHeight(x, z) : 0;
     }
     setBlock(x, y, z, block) {
         if (!(0 <= y && y < kWorldHeight))
@@ -1096,27 +1165,26 @@ class Env {
     }
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;
-        const xi = Math.floor(x), zi = Math.floor(z);
-        let yi = Math.floor(y), yf = y - yi;
+        const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+        let boundary = 1;
         // We should only apply wave if the block above a liquid is an air block.
         const new_block = (() => {
             const below = this.getRenderBlock(xi, yi, zi);
-            if (below === kEmptyBlock || yf + wave <= 1)
+            if (below === kEmptyBlock)
                 return below;
             const above = this.getRenderBlock(xi, yi + 1, zi);
             if (above !== kEmptyBlock)
                 return below;
-            yi += 1;
-            yf += wave - 1;
-            return kEmptyBlock;
+            const delta = y + wave - yi - 1;
+            boundary = Math.abs(delta);
+            return delta > 0 ? kEmptyBlock : below;
         })();
         const old_block = this.cameraBlock;
         this.cameraBlock = new_block;
         const max = kMinZUpperBound;
         const min = kMinZLowerBound;
-        const focus = new_block === kEmptyBlock && yf < 2 * max &&
-            this.getRenderBlock(xi, yi - 1, zi) !== kEmptyBlock;
-        this.renderer.camera.setMinZ(focus ? Math.max(yf / 2, min) : max);
+        const minZ = Math.max(Math.min(boundary / 2, max), min);
+        this.renderer.camera.setMinZ(minZ);
         if (new_block === kEmptyBlock) {
             const changed = new_block !== old_block;
             if (changed)
@@ -1134,7 +1202,7 @@ class Env {
             const limit = max * step;
             for (let i = 1; i < limit; i++) {
                 const other = this.world.getBlock(xi, yi + i, zi);
-                if (other === kEmptyBlock)
+                if (other !== new_block)
                     return Math.pow(2, i / step);
             }
             return Math.pow(2, max);

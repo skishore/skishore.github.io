@@ -639,7 +639,7 @@ const kVoxelShader = `
     if (hide) gl_Position[3] = 0.0;
   }
 #split
-  uniform int u_alphaTest;
+  uniform float u_alphaTest;
   uniform vec3 u_fogColor;
   uniform float u_fogDepth;
   uniform sampler2DArray u_texture;
@@ -654,10 +654,7 @@ const kVoxelShader = `
     vec3 index = v_uvw + vec3(v_move, v_move, 0.0);
     vec4 color = v_color * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
-    if (u_alphaTest != 0) {
-      if (o_color[3] < 0.5) discard;
-      o_color[3] = 1.0;
-    }
+    if (o_color[3] < 0.5 * u_alphaTest) discard;
   }
 `;
 class VoxelShader extends Shader {
@@ -796,7 +793,7 @@ class VoxelManager {
         const fog_depth = overlay.getFogDepth();
         gl.uniform1f(shader.u_move, move);
         gl.uniform1f(shader.u_wave, wave);
-        gl.uniform1i(shader.u_alphaTest, 1);
+        gl.uniform1f(shader.u_alphaTest, 1);
         gl.uniform3fv(shader.u_fogColor, fog_color);
         gl.uniform1f(shader.u_fogDepth, fog_depth);
         if (phase === 0) {
@@ -809,10 +806,9 @@ class VoxelManager {
         }
         else {
             // Alpha-blended voxel meshes. (Should we sort them?)
-            gl.depthMask(false);
             gl.enable(gl.BLEND);
             gl.disable(gl.CULL_FACE);
-            gl.uniform1i(shader.u_alphaTest, 0);
+            gl.uniform1f(shader.u_alphaTest, 0);
             for (const mesh of this.water_meshes) {
                 if (mesh.draw(camera, planes))
                     drawn++;
@@ -820,7 +816,6 @@ class VoxelManager {
             total = this.water_meshes.length;
             gl.enable(gl.CULL_FACE);
             gl.disable(gl.BLEND);
-            gl.depthMask(true);
         }
         stats.drawn += drawn;
         stats.total += total;
@@ -851,6 +846,7 @@ const kSpriteShader = `
   }
 #split
   uniform float u_frame;
+  uniform float u_light;
   uniform sampler2DArray u_texture;
   in vec2 v_uv;
   out vec4 o_color;
@@ -858,7 +854,7 @@ const kSpriteShader = `
   void main() {
     o_color = texture(u_texture, vec3(v_uv, u_frame));
     if (o_color[3] < 0.5) discard;
-    o_color[3] = 1.0;
+    o_color *= u_light;
   }
 `;
 class SpriteShader extends Shader {
@@ -869,6 +865,7 @@ class SpriteShader extends Shader {
         this.u_billboard = this.getUniformLocation('u_billboard');
         this.u_transform = this.getUniformLocation('u_transform');
         this.u_frame = this.getUniformLocation('u_frame');
+        this.u_light = this.getUniformLocation('u_light');
     }
 }
 ;
@@ -876,6 +873,7 @@ class SpriteMesh extends Mesh {
     constructor(manager, meshes, sprite) {
         super(manager, meshes);
         this.frame = 0;
+        this.light = 1;
         this.manager = manager;
         this.size = sprite.size;
         this.stuv = new Float32Array(4);
@@ -892,6 +890,7 @@ class SpriteMesh extends Mesh {
         gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
         gl.uniform1f(shader.u_size, this.size);
         gl.uniform4fv(shader.u_stuv, this.stuv);
+        gl.uniform1f(shader.u_light, this.light);
         gl.uniform1f(shader.u_frame, this.frame);
         gl.uniformMatrix4fv(shader.u_transform, false, transform);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
@@ -899,6 +898,9 @@ class SpriteMesh extends Mesh {
     }
     setFrame(frame) {
         this.frame = frame;
+    }
+    setLight(light) {
+        this.light = light;
     }
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
@@ -953,6 +955,7 @@ class SpriteManager {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
+const kShadowAlpha = 0.36;
 const kShadowShader = `
   uniform float u_size;
   uniform mat4 u_transform;
@@ -976,7 +979,7 @@ const kShadowShader = `
   void main() {
     float radius = length(v_pos);
     if (radius > 0.5) discard;
-    o_color = vec4(0.0, 0.0, 0.0, 0.5);
+    o_color = vec4(0.0, 0.0, 0.0, ${kShadowAlpha});
   }
 `;
 class ShadowShader extends Shader {
@@ -1028,7 +1031,7 @@ class ShadowManager {
         for (let i = 0; i < 8; i++) {
             const bound = result[i];
             bound[0] = (i & 1) ? size : -size;
-            bound[2] = (i & 1) ? size : -size;
+            bound[2] = (i & 4) ? size : -size;
         }
         return result;
     }
@@ -1056,7 +1059,7 @@ const kScreenOverlayShader = `
     int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID : 0);
     float w = float(((index + 1) & 3) >> 1);
     float h = float(((index + 0) & 3) >> 1);
-    gl_Position = vec4(2.0 * w - 1.0, 2.0 * h - 1.0, 0.0, 1.0);
+    gl_Position = vec4(2.0 * w - 1.0, 2.0 * h - 1.0, 1.0, 1.0);
   }
 #split
   uniform vec4 u_color;
@@ -1082,10 +1085,15 @@ class ScreenOverlay {
         this.shader = new ScreenOverlayShader(gl);
     }
     draw() {
-        if (this.color[3] === 1)
+        const alpha = this.color[3];
+        if (alpha === 1)
             return;
         this.shader.bind();
         const gl = this.gl;
+        this.color[3] = 1;
+        gl.uniform4fv(this.shader.u_color, this.color);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, 2);
+        this.color[3] = alpha;
         gl.enable(gl.BLEND);
         gl.disable(gl.DEPTH_TEST);
         gl.uniform4fv(this.shader.u_color, this.color);
@@ -1097,7 +1105,7 @@ class ScreenOverlay {
         return this.fog_color;
     }
     getFogDepth() {
-        return this.color[3] === 1 ? 1024 : 16;
+        return this.color[3] === 1 ? 1024 : 64;
     }
     setColor(color) {
         for (let i = 0; i < 4; i++)
@@ -1176,5 +1184,5 @@ class Renderer {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-export { Geometry, Renderer };
+export { kShadowAlpha, Geometry, Renderer };
 //# sourceMappingURL=renderer.js.map
