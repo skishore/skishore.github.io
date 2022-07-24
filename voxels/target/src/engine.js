@@ -276,7 +276,7 @@ class Column {
         }
         this.detectEquiLevelChanges(first);
     }
-    fillEquiLevels(equilevels) {
+    fillEquilevels(equilevels) {
         let current = 0;
         const mismatches = this.mismatches;
         for (let i = 0; i < kWorldHeight; i++) {
@@ -316,9 +316,18 @@ class Column {
             this.data[offset + 1] = kWorldHeight;
             this.size++;
         }
-        if (first) {
+        if (first)
             this.mismatches.fill(0);
-            this.reference_data.set(this.data);
+        for (let i = 0; i < this.decorations.length; i += 2) {
+            const level = this.decorations[i + 1];
+            this.mismatches[level]++;
+            if (level + 1 < kWorldHeight)
+                this.mismatches[level + 1]--;
+        }
+        if (first) {
+            for (let i = 0; i < 2 * this.size; i++) {
+                this.reference_data[i] = this.data[i];
+            }
             this.reference_size = this.size;
             return;
         }
@@ -440,17 +449,19 @@ const kNumLODChunksToMeshPerFrame = 1;
 const kFrontierLOD = 2;
 const kFrontierRadius = 8;
 const kFrontierLevels = 6;
+// Enable debug assertions for the equi-levels optimization.
+const kCheckEquilevels = false;
 const kNeighborOffsets = (() => {
     const W = kChunkWidth;
     const H = kWorldHeight;
     const L = W - 1;
     const N = W + 1;
     return [
-        [[0, 0, 0], [1, 2, 1], [0, 0, 0], [W, H, W]],
-        [[-1, 0, 0], [0, 2, 1], [L, 0, 0], [1, H, W]],
-        [[1, 0, 0], [N, 2, 1], [0, 0, 0], [1, H, W]],
-        [[0, 0, -1], [1, 2, 0], [0, 0, L], [W, H, 1]],
-        [[0, 0, 1], [1, 2, N], [0, 0, 0], [W, H, 1]],
+        [[0, 0, 0], [1, 1, 1], [0, 0, 0], [W, H, W]],
+        [[-1, 0, 0], [0, 1, 1], [L, 0, 0], [1, H, W]],
+        [[1, 0, 0], [N, 1, 1], [0, 0, 0], [1, H, W]],
+        [[0, 0, -1], [1, 1, 0], [0, 0, L], [W, H, 1]],
+        [[0, 0, 1], [1, 1, N], [0, 0, 0], [W, H, 1]],
     ];
 })();
 class Chunk {
@@ -547,7 +558,19 @@ class Chunk {
                 column.clear();
             }
         }
-        column.fillEquiLevels(this.equilevels);
+        column.fillEquilevels(this.equilevels);
+        if (kCheckEquilevels) {
+            for (let y = 0; y < kWorldHeight; y++) {
+                if (this.equilevels[y] === 0)
+                    continue;
+                const base = this.voxels.get(0, y, 0);
+                for (let x = 0; x < kChunkWidth; x++) {
+                    for (let z = 0; z < kChunkWidth; z++) {
+                        assert(this.voxels.get(x, y, z) === base);
+                    }
+                }
+            }
+        }
         const neighbor = (x, z) => {
             const chunk = this.world.chunks.get(x + cx, z + cz);
             if (!chunk)
@@ -589,26 +612,47 @@ class Chunk {
     }
     remeshTerrain() {
         const { cx, cz, world } = this;
-        const { bedrock, buffer, heightmap } = world;
+        const { bedrock, buffer, heightmap, equilevels } = world;
+        equilevels.set(this.equilevels, 1);
         for (const offset of kNeighborOffsets) {
             const [c, dstPos, srcPos, size] = offset;
             const chunk = world.chunks.get(cx + c[0], cz + c[2]);
+            const delta = dstPos[1] - srcPos[1];
+            assert(delta === 1);
             if (chunk) {
                 this.copyHeightmap(heightmap, dstPos, chunk.heightmap, srcPos, size);
                 this.copyVoxels(buffer, dstPos, chunk.voxels, srcPos, size);
             }
             else {
-                this.zeroHeightmap(heightmap, dstPos, size, dstPos[1] - srcPos[1]);
+                this.zeroHeightmap(heightmap, dstPos, size, delta);
                 this.zeroVoxels(buffer, dstPos, size);
+            }
+            if (chunk !== this) {
+                this.copyEquilevels(equilevels, chunk, srcPos, size, delta);
+            }
+        }
+        if (kCheckEquilevels) {
+            for (let y = 0; y < buffer.shape[1]; y++) {
+                if (equilevels[y] === 0)
+                    continue;
+                const base = buffer.get(1, y, 1);
+                for (let x = 0; x < buffer.shape[0]; x++) {
+                    for (let z = 0; z < buffer.shape[2]; z++) {
+                        if ((x !== 0 && x !== buffer.shape[0] - 1) ||
+                            (z !== 0 && z !== buffer.shape[2] - 1)) {
+                            assert(buffer.get(x, y, z) === base);
+                        }
+                    }
+                }
             }
         }
         const x = cx << kChunkBits, z = cz << kChunkBits;
-        const meshed = world.mesher.meshChunk(buffer, heightmap, this.solid, this.water);
+        const meshed = world.mesher.meshChunk(buffer, heightmap, equilevels, this.solid, this.water);
         const [solid, water] = meshed;
         if (solid)
-            solid.setPosition(x, -1, z);
+            solid.setPosition(x, 0, z);
         if (water)
-            water.setPosition(x, -1, z);
+            water.setPosition(x, 0, z);
         this.solid = solid;
         this.water = water;
     }
@@ -628,6 +672,39 @@ class Chunk {
         }
         else if (block !== kEmptyBlock && height <= end) {
             this.heightmap.data[offset] = end;
+        }
+    }
+    copyEquilevels(dst, chunk, srcPos, size, delta) {
+        assert(this.voxels.stride[1] === 1);
+        const data = this.voxels.data;
+        if (chunk === null) {
+            for (let i = 0; i < kWorldHeight; i++) {
+                if (dst[i + delta] === 0)
+                    continue;
+                if (data[i] !== kEmptyBlock)
+                    dst[i + delta] = 0;
+            }
+            return;
+        }
+        assert(chunk.voxels.stride[1] === 1);
+        assert(size[0] === 1 || size[2] === 1);
+        const stride = chunk.voxels.stride[size[0] === 1 ? 2 : 0];
+        const index = chunk.voxels.index(srcPos[0], srcPos[1], srcPos[2]);
+        const limit = stride * (size[0] === 1 ? size[2] : size[0]);
+        const chunk_equilevels = chunk.equilevels;
+        const chunk_data = chunk.voxels.data;
+        for (let i = 0; i < kWorldHeight; i++) {
+            if (dst[i + delta] === 0)
+                continue;
+            const base = data[i];
+            if (chunk_equilevels[i] === 1 && chunk_data[i] === base)
+                continue;
+            for (let offset = 0; offset < limit; offset += stride) {
+                if (chunk_data[index + offset + i] === base)
+                    continue;
+                dst[i + delta] = 0;
+                break;
+            }
         }
     }
     copyHeightmap(dst, dstPos, src, srcPos, size) {
@@ -657,12 +734,12 @@ class Chunk {
             }
         }
     }
-    zeroHeightmap(dst, dstPos, size, offset) {
+    zeroHeightmap(dst, dstPos, size, delta) {
         const ni = size[0], nk = size[2];
         const di = dstPos[0], dk = dstPos[2];
         for (let i = 0; i < ni; i++) {
             for (let k = 0; k < nk; k++) {
-                dst.set(di + i, dk + k, offset);
+                dst.set(di + i, dk + k, delta);
             }
         }
     }
@@ -932,9 +1009,11 @@ class World {
         // have room for a plane of bedrock blocks below this chunk (in case we
         // dig all the way to y = 0).
         const w = kChunkWidth + 2;
-        const h = kWorldHeight + 3;
+        const h = kWorldHeight + 2;
         this.buffer = new Tensor3(w, h, w);
         this.heightmap = new Tensor2(w, w);
+        this.equilevels = new Int16Array(h);
+        this.equilevels[0] = this.equilevels[h - 1] = 1;
     }
     getBlock(x, y, z) {
         if (y < 0)
@@ -966,14 +1045,13 @@ class World {
         for (let x = 0; x < buffer.shape[0]; x++) {
             for (let z = 0; z < buffer.shape[2]; z++) {
                 buffer.set(x, 0, z, bedrock);
-                buffer.set(x, 1, z, bedrock);
             }
         }
     }
     recenter(x, y, z) {
         const { chunks, frontier, loadChunk } = this;
-        const cx = (x >> kChunkBits);
-        const cz = (z >> kChunkBits);
+        const cx = Math.floor(x) >> kChunkBits;
+        const cz = Math.floor(z) >> kChunkBits;
         chunks.center(cx, cz);
         frontier.center(cx, cz);
         if (!loadChunk)
@@ -1143,9 +1221,9 @@ class Env {
             return false;
         };
         const buffer = 1 / kSweepResolution;
-        const x = ((target[0] * kSweepResolution) | 0) / kSweepResolution;
-        const y = ((target[1] * kSweepResolution) | 0) / kSweepResolution;
-        const z = ((target[2] * kSweepResolution) | 0) / kSweepResolution;
+        const x = Math.floor(target[0] * kSweepResolution) / kSweepResolution;
+        const y = Math.floor(target[1] * kSweepResolution) / kSweepResolution;
+        const z = Math.floor(target[2] * kSweepResolution) / kSweepResolution;
         Vec3.set(kTmpMin, x - buffer, y - buffer, z - buffer);
         Vec3.set(kTmpMax, x + buffer, y + buffer, z + buffer);
         Vec3.scale(kTmpDelta, direction, 10);
