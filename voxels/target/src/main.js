@@ -427,7 +427,7 @@ const Meshes = (env) => ({
             if (!state.mesh)
                 continue;
             const { x, y, z, h } = env.position.getX(state.id);
-            const lit = y >= env.world.getHeight(Math.floor(x), Math.floor(z));
+            const lit = env.world.isBlockLit(Math.floor(x), Math.floor(y), Math.floor(z));
             state.mesh.setPosition(x, y - h / 2, z);
             state.mesh.setLight(lit ? 1 : 0.64);
         }
@@ -494,8 +494,12 @@ const CameraTarget = (env) => ({
     init: () => ({ id: kNoEntity, index: 0 }),
     onRender: (dt, states) => {
         for (const state of states) {
-            const { x, y, z, h } = env.position.getX(state.id);
-            env.renderer.camera.setTarget(x, y + h / 3, z);
+            const { x, y, z, h, w } = env.position.getX(state.id);
+            env.setCameraTarget(x, y + h / 3, z);
+            const mesh = env.meshes.get(state.id);
+            const zoom = env.renderer.camera.safe_zoom;
+            if (mesh && mesh.mesh)
+                mesh.mesh.enabled = zoom > 2 * w;
         }
     },
     onUpdate: (dt, states) => {
@@ -537,12 +541,13 @@ const main = () => {
     env.movement.add(player);
     env.shadow.add(player);
     env.target.add(player);
-    const texture = (x, y, alphaTest = false) => {
-        return { alphaTest, url: 'images/rhodox-edited.png', x, y, w: 16, h: 16 };
+    const texture = (x, y, alphaTest = false, sparkle = false) => {
+        const url = 'images/rhodox-edited.png';
+        return { alphaTest, sparkle, url, x, y, w: 16, h: 16 };
     };
     const registry = env.registry;
-    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.4], true);
-    registry.addMaterialOfTexture('water', texture(13, 12), [1, 1, 1, 0.8], true);
+    registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.6], true);
+    registry.addMaterialOfTexture('water', texture(13, 12, false, true), [1, 1, 1, 0.8], true);
     registry.addMaterialOfTexture('leaves', texture(4, 3, true));
     const textures = [
         ['bedrock', 1, 1],

@@ -8,6 +8,7 @@ class Camera {
         this.pitch = 0;
         this.heading = 0;
         this.zoom = 0;
+        this.safe_zoom = 0;
         this.direction = Vec3.from(0, 0, 1);
         this.position = Vec3.create();
         this.target = Vec3.create();
@@ -101,6 +102,7 @@ class Camera {
     setSafeZoomDistance(zoom) {
         zoom = Math.max(Math.min(zoom, this.zoom), 0);
         Vec3.scaleAndAdd(this.position, this.target, this.direction, -zoom);
+        this.safe_zoom = zoom;
     }
     setTarget(x, y, z) {
         Vec3.set(this.target, x, y, z);
@@ -191,8 +193,11 @@ class TextureAtlas {
         this.texture = nonnull(gl.createTexture());
         this.canvas = null;
         this.images = new Map();
-        this.data = new Uint8Array();
         this.nextResult = 0;
+        this.data = new Uint8Array();
+        this.sparkle_data = new Uint8Array();
+        this.sparkle_last = new Uint8Array();
+        this.sparkle_indices = [];
         this.bind();
         const id = TEXTURE_2D_ARRAY;
         gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
@@ -207,10 +212,54 @@ class TextureAtlas {
         else {
             image.addEventListener('load', () => this.loaded(texture, index, image));
         }
+        if (texture.sparkle)
+            this.sparkle_indices.push(index);
         return index;
     }
     bind() {
         this.gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
+    }
+    sparkle() {
+        if (!this.canvas)
+            return;
+        const size = this.canvas.canvas.width;
+        const length = size * size * 4;
+        if (this.sparkle_data.length === 0) {
+            this.sparkle_data = new Uint8Array(length);
+            this.sparkle_last = new Uint8Array(length / 4);
+        }
+        const { gl, sparkle_data, sparkle_last } = this;
+        assert(sparkle_data.length === length);
+        const limit = sparkle_last.length;
+        for (let i = 0; i < limit; i++) {
+            const value = sparkle_last[i];
+            if (value > 0) {
+                sparkle_last[i] = Math.max(value - 4, 0);
+            }
+            else if (Math.random() < 0.004) {
+                sparkle_last[i] = 128;
+            }
+        }
+        for (const index of this.sparkle_indices) {
+            const offset = length * index;
+            const limit = offset + length;
+            if (this.data.length < limit)
+                continue;
+            sparkle_data.set(this.data.subarray(offset, limit));
+            for (let i = 0; i < size; i++) {
+                for (let j = 0; j < size; j++) {
+                    const index = (i * size + j);
+                    const value = sparkle_last[index];
+                    if (value === 0)
+                        continue;
+                    const k = 4 * index;
+                    sparkle_data[k + 0] = Math.min(sparkle_data[k + 0] + value, 255);
+                    sparkle_data[k + 1] = Math.min(sparkle_data[k + 1] + value, 255);
+                    sparkle_data[k + 2] = Math.min(sparkle_data[k + 2] + value, 255);
+                }
+            }
+            gl.texSubImage3D(TEXTURE_2D_ARRAY, 0, 0, 0, index, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, sparkle_data, 0);
+        }
     }
     image(url) {
         const existing = this.images.get(url);
@@ -289,6 +338,10 @@ class TextureAtlas {
         }
         else {
             gl.texSubImage3D(TEXTURE_2D_ARRAY, 0, 0, 0, index, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.data, offset);
+            for (const sindex of this.sparkle_indices) {
+                const soffset = length * sindex;
+                gl.texSubImage3D(TEXTURE_2D_ARRAY, 0, 0, 0, sindex, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.data, soffset);
+            }
         }
         gl.generateMipmap(TEXTURE_2D_ARRAY);
     }
@@ -450,7 +503,7 @@ Geometry.OffsetDim = 10;
 Geometry.OffsetDir = 11;
 // mask: float -> int32; small int
 Geometry.OffsetMask = 12;
-// wave: float -> int32; {0, 1}
+// wave: float -> int32; 4 packed 1-bit values
 Geometry.OffsetWave = 13;
 // texture: float -> int32; medium int
 Geometry.OffsetTexture = 14;
@@ -624,12 +677,13 @@ const kVoxelShader = `
       v_uvw[1] = (a_size[0] - kTextureBuffer) * (1.0 - w);
     }
 
-    v_move = a_wave * u_move;
+    float wave = float((int(a_wave) >> index) & 0x1);
+    v_move = wave * u_move;
 
     vec3 pos = a_pos;
     pos[(dim + 1) % 3] += w * a_size[0];
     pos[(dim + 2) % 3] += h * a_size[1];
-    pos[1] -= a_wave * u_wave;
+    pos[1] -= wave * u_wave;
     gl_Position = u_transform * vec4(pos, 1.0);
 
     int mask = int(a_mask);
@@ -776,19 +830,19 @@ class VoxelManager {
         this.shader = new VoxelShader(gl);
         this.atlas = new TextureAtlas(gl);
         this.allocator = new BufferAllocator(gl);
-        this.solid_meshes = [];
-        this.water_meshes = [];
+        this.phases = [[], [], []];
     }
-    addMesh(geo, solid) {
+    addMesh(geo, phase) {
         assert(geo.num_quads > 0);
-        const meshes = solid ? this.solid_meshes : this.water_meshes;
-        return new VoxelMesh(this, meshes, geo);
+        assert(0 <= phase && phase < this.phases.length);
+        return new VoxelMesh(this, this.phases[phase], geo);
     }
     render(camera, planes, stats, overlay, move, wave, phase) {
         const { atlas, gl, shader } = this;
-        let drawn = 0, total = 0;
+        let drawn = 0;
         atlas.bind();
         shader.bind();
+        const meshes = this.phases[phase];
         const fog_color = overlay.getFogColor();
         const fog_depth = overlay.getFogDepth();
         gl.uniform1f(shader.u_move, move);
@@ -796,29 +850,33 @@ class VoxelManager {
         gl.uniform1f(shader.u_alphaTest, 1);
         gl.uniform3fv(shader.u_fogColor, fog_color);
         gl.uniform1f(shader.u_fogDepth, fog_depth);
+        // Rendering phases:
+        //   0) Opaque and alpha-tested voxel meshes.
+        //   1) The highlight mesh, drawn before shadows and other effects.
+        //   2) All other alpha-blended voxel meshes. (Should we sort them?)
         if (phase === 0) {
-            // Opaque and alpha-tested voxel meshes.
-            for (const mesh of this.solid_meshes) {
+            for (const mesh of meshes) {
                 if (mesh.draw(camera, planes))
                     drawn++;
             }
-            total = this.solid_meshes.length;
         }
         else {
-            // Alpha-blended voxel meshes. (Should we sort them?)
             gl.enable(gl.BLEND);
             gl.disable(gl.CULL_FACE);
+            if (phase === 1)
+                gl.depthMask(false);
             gl.uniform1f(shader.u_alphaTest, 0);
-            for (const mesh of this.water_meshes) {
+            for (const mesh of meshes) {
                 if (mesh.draw(camera, planes))
                     drawn++;
             }
-            total = this.water_meshes.length;
+            if (phase === 1)
+                gl.depthMask(true);
             gl.enable(gl.CULL_FACE);
             gl.disable(gl.BLEND);
         }
         stats.drawn += drawn;
-        stats.total += total;
+        stats.total += meshes.length;
     }
 }
 ;
@@ -872,6 +930,7 @@ class SpriteShader extends Shader {
 class SpriteMesh extends Mesh {
     constructor(manager, meshes, sprite) {
         super(manager, meshes);
+        this.enabled = true;
         this.frame = 0;
         this.light = 1;
         this.manager = manager;
@@ -882,6 +941,8 @@ class SpriteMesh extends Mesh {
         this.texture = manager.atlas.addSprite(sprite);
     }
     draw(camera, planes) {
+        if (!this.enabled)
+            return false;
         const bounds = this.manager.getBounds(this.size);
         if (this.cull(bounds, camera, planes))
             return false;
@@ -1040,12 +1101,14 @@ class ShadowManager {
         let drawn = 0;
         // All sprite meshes are alpha-blended.
         shader.bind();
+        gl.depthMask(false);
         gl.enable(gl.BLEND);
         for (const mesh of this.meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
         gl.disable(gl.BLEND);
+        gl.depthMask(true);
         stats.drawn += drawn;
         stats.total += this.meshes.length;
     }
@@ -1159,21 +1222,23 @@ class Renderer {
     addSpriteMesh(sprite) {
         return this.sprite_manager.addMesh(sprite);
     }
-    addVoxelMesh(geo, solid) {
-        return this.voxels_manager.addMesh(geo, solid);
+    addVoxelMesh(geo, phase) {
+        return this.voxels_manager.addMesh(geo, phase);
     }
     render(move, wave) {
         const { gl, overlay } = this;
         const [r, g, b] = kDefaultSkyColor;
         gl.clearColor(r, g, b, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        this.voxels_manager.atlas.sparkle();
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
         const stats = { drawn: 0, total: 0 };
         this.sprite_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
-        this.shadow_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
+        this.shadow_manager.render(camera, planes, stats);
+        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 2);
         overlay.draw();
         return `${this.voxels_manager.allocator.stats()}\r\n` +
             `Draw calls: ${stats.drawn} / ${stats.total}`;
