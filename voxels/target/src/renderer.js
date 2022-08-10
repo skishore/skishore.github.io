@@ -212,8 +212,6 @@ class TextureAtlas {
         else {
             image.addEventListener('load', () => this.loaded(texture, index, image));
         }
-        if (texture.sparkle)
-            this.sparkle_indices.push(index);
         return index;
     }
     bind() {
@@ -221,6 +219,8 @@ class TextureAtlas {
     }
     sparkle() {
         if (!this.canvas)
+            return;
+        if (this.sparkle_indices.length === 0)
             return;
         const size = this.canvas.canvas.width;
         const length = size * size * 4;
@@ -240,6 +240,7 @@ class TextureAtlas {
                 sparkle_last[i] = 128;
             }
         }
+        this.bind();
         for (const index of this.sparkle_indices) {
             const offset = length * index;
             const limit = offset + length;
@@ -340,10 +341,13 @@ class TextureAtlas {
             gl.texSubImage3D(TEXTURE_2D_ARRAY, 0, 0, 0, index, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.data, offset);
             for (const sindex of this.sparkle_indices) {
                 const soffset = length * sindex;
+                assert(soffset + length <= this.data.length);
                 gl.texSubImage3D(TEXTURE_2D_ARRAY, 0, 0, 0, sindex, size, size, 1, gl.RGBA, gl.UNSIGNED_BYTE, this.data, soffset);
             }
         }
         gl.generateMipmap(TEXTURE_2D_ARRAY);
+        if (texture.sparkle)
+            this.sparkle_indices.push(index);
     }
 }
 ;
@@ -1191,10 +1195,10 @@ class ScreenOverlay {
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
-        const size = params.get('size') || 'large';
+        const size = params.get('size') || 'small';
         const base = size === 'small' ? '1' : '2';
         const scale = parseFloat(params.get('scale') || base);
-        const container = nonnull(canvas.parentElement);
+        const container = nonnull(nonnull(canvas.parentElement).parentElement);
         container.classList.add(size);
         canvas.width = canvas.clientWidth / scale;
         canvas.height = canvas.clientHeight / scale;

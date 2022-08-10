@@ -8,7 +8,7 @@ class Container {
     constructor(id) {
         this.element = nonnull(document.getElementById(id), () => id);
         this.canvas = nonnull(this.element.querySelector('canvas'));
-        this.stats = nonnull(this.element.querySelector('#stats'));
+        this.stats = document.getElementById('stats');
         this.inputs = {
             up: false,
             left: false,
@@ -28,8 +28,14 @@ class Container {
         this.bindings.set('D'.charCodeAt(0), 'right');
         this.bindings.set('E'.charCodeAt(0), 'hover');
         this.bindings.set(' '.charCodeAt(0), 'space');
-        const element = this.element;
-        element.addEventListener('click', () => element.requestPointerLock());
+        const canvas = this.canvas;
+        const target = nonnull(this.canvas.parentElement);
+        target.addEventListener('click', (e) => {
+            if (this.inputs.pointer)
+                return;
+            this.onMimicPointerLock(e, true);
+            this.insistOnPointerLock();
+        });
         document.addEventListener('keydown', e => this.onKeyInput(e, true));
         document.addEventListener('keyup', e => this.onKeyInput(e, false));
         document.addEventListener('mousedown', e => this.onMouseDown(e));
@@ -39,12 +45,24 @@ class Container {
         document.addEventListener('wheel', e => this.onMouseWheel(e));
     }
     displayStats(stats) {
-        this.stats.textContent = stats;
+        if (this.stats)
+            this.stats.textContent = stats;
+    }
+    insistOnPointerLock() {
+        if (!this.inputs.pointer)
+            return;
+        if (document.pointerLockElement === this.canvas)
+            return;
+        this.canvas.requestPointerLock();
+        setTimeout(() => this.insistOnPointerLock(), 100);
     }
     onKeyInput(e, down) {
         if (!this.inputs.pointer)
             return;
-        const input = this.bindings.get(e.keyCode);
+        const keycode = e.keyCode;
+        if (keycode === 27)
+            return this.onMimicPointerLock(e, false);
+        const input = this.bindings.get(keycode);
         if (input)
             this.onInput(e, input, down);
     }
@@ -68,9 +86,16 @@ class Container {
             return;
         this.deltas.scroll += e.deltaY;
     }
-    onPointerInput(e) {
-        const locked = document.pointerLockElement === this.element;
+    onMimicPointerLock(e, locked) {
+        if (locked)
+            this.element.classList.remove('paused');
+        if (!locked)
+            this.element.classList.add('paused');
         this.onInput(e, 'pointer', locked);
+    }
+    onPointerInput(e) {
+        const locked = document.pointerLockElement === this.canvas;
+        this.onMimicPointerLock(e, locked);
     }
     onInput(e, input, state) {
         this.inputs[input] = state;
