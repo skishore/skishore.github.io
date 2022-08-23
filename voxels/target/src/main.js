@@ -24,6 +24,7 @@ class TypedEnv extends Env {
         const ents = this.entities;
         this.lifetime = ents.registerComponent('lifetime', Lifetime);
         this.position = ents.registerComponent('position', Position);
+        this.inputs = ents.registerComponent('inputs', Inputs(this));
         this.movement = ents.registerComponent('movement', Movement(this));
         this.physics = ents.registerComponent('physics', Physics(this));
         this.meshes = ents.registerComponent('meshes', Meshes(this));
@@ -341,30 +342,11 @@ const tryToModifyBlock = (env, body, add) => {
 };
 const runMovement = (env, dt, state) => {
     dt = dt / 1000;
-    // Process the inputs to get a heading, running, and jumping state.
-    const inputs = env.container.inputs;
-    const fb = (inputs.up ? 1 : 0) - (inputs.down ? 1 : 0);
-    const lr = (inputs.right ? 1 : 0) - (inputs.left ? 1 : 0);
-    state.running = fb !== 0 || lr !== 0;
-    state.jumping = inputs.space;
-    if (state.running) {
-        let heading = env.renderer.camera.heading;
-        if (fb) {
-            if (fb === -1)
-                heading += Math.PI;
-            heading += fb * lr * Math.PI / 4;
-        }
-        else {
-            heading += lr * Math.PI / 2;
-        }
-        state.heading = heading;
-    }
-    // All inputs processed; update the entity's PhysicsState.
     const body = env.physics.getX(state.id);
     const grounded = body.resting[1] < 0;
     if (grounded)
         state._jumpCount = 0;
-    if (inputs.hover) {
+    if (state.hovering) {
         const force = body.vel[1] < 0 ? state.hoverFallForce : state.hoverRiseForce;
         body.forces[1] += force;
     }
@@ -381,12 +363,6 @@ const runMovement = (env, dt, state) => {
     else {
         body.friction = state.standingFriction;
     }
-    // Turn mouse inputs into actions.
-    if (inputs.mouse0 || inputs.mouse1) {
-        tryToModifyBlock(env, body, !inputs.mouse0);
-        inputs.mouse0 = false;
-        inputs.mouse1 = false;
-    }
 };
 const Movement = (env) => ({
     init: () => ({
@@ -395,6 +371,7 @@ const Movement = (env) => ({
         heading: 0,
         running: false,
         jumping: false,
+        hovering: false,
         maxSpeed: 10,
         moveForce: 30,
         swimPenalty: 0.5,
@@ -417,9 +394,65 @@ const Movement = (env) => ({
             runMovement(env, dt, state);
     }
 });
+// An entity with an input component processes inputs.
+const runInputs = (env, id) => {
+    const state = env.movement.get(id);
+    if (!state)
+        return;
+    // Process the inputs to get a heading, running, and jumping state.
+    const inputs = env.container.inputs;
+    const fb = (inputs.up ? 1 : 0) - (inputs.down ? 1 : 0);
+    const lr = (inputs.right ? 1 : 0) - (inputs.left ? 1 : 0);
+    state.running = fb !== 0 || lr !== 0;
+    state.jumping = inputs.space;
+    state.hovering = inputs.hover;
+    if (state.running) {
+        let heading = env.renderer.camera.heading;
+        if (fb) {
+            if (fb === -1)
+                heading += Math.PI;
+            heading += fb * lr * Math.PI / 4;
+        }
+        else {
+            heading += lr * Math.PI / 2;
+        }
+        state.heading = heading;
+        const mesh = env.meshes.get(id);
+        if (mesh) {
+            const row = mesh.row;
+            const option_a = fb > 0 ? 0 : fb < 0 ? 2 : -1;
+            const option_b = lr > 0 ? 3 : lr < 0 ? 1 : -1;
+            if (row !== option_a && row !== option_b) {
+                mesh.row = Math.max(option_a, option_b);
+            }
+        }
+    }
+    // Turn mouse inputs into actions.
+    if (inputs.mouse0 || inputs.mouse1) {
+        const body = env.physics.get(id);
+        if (body)
+            tryToModifyBlock(env, body, !inputs.mouse0);
+        inputs.mouse0 = false;
+        inputs.mouse1 = false;
+    }
+};
+const Inputs = (env) => ({
+    init: () => ({ id: kNoEntity, index: 0 }),
+    onUpdate: (dt, states) => {
+        for (const state of states)
+            runInputs(env, state.id);
+    }
+});
 ;
 const Meshes = (env) => ({
-    init: () => ({ id: kNoEntity, index: 0, mesh: null, frame: 0 }),
+    init: () => ({
+        id: kNoEntity,
+        index: 0,
+        mesh: null,
+        columns: 0,
+        frame: 0,
+        row: 0,
+    }),
     onRemove: (state) => { if (state.mesh)
         state.mesh.dispose(); },
     onRender: (dt, states) => {
@@ -434,14 +467,12 @@ const Meshes = (env) => ({
     },
     onUpdate: (dt, states) => {
         for (const state of states) {
-            if (!state.mesh)
-                return;
-            if (!env.movement.get(state.id))
+            if (!state.mesh || !state.columns)
                 return;
             const body = env.physics.get(state.id);
             if (!body)
                 return;
-            const setting = (() => {
+            const column = (() => {
                 if (!body.resting[1])
                     return 1;
                 const speed = Vec3.length(body.vel);
@@ -451,7 +482,7 @@ const Meshes = (env) => ({
                 const value = Math.floor(state.frame);
                 return value & 1 ? 0 : (value + 2) >> 1;
             })();
-            state.mesh.setFrame(setting);
+            state.mesh.setFrame(column + state.row * state.columns);
         }
     },
 });
@@ -537,8 +568,10 @@ const main = () => {
     const mesh = env.meshes.add(player);
     const sprite = { url: 'images/player.png', size, x: 32, y: 32 };
     mesh.mesh = env.renderer.addSpriteMesh(sprite);
+    mesh.columns = 3;
     env.physics.add(player);
     env.movement.add(player);
+    env.inputs.add(player);
     env.shadow.add(player);
     env.target.add(player);
     const texture = (x, y, alphaTest = false, sparkle = false) => {

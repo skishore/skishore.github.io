@@ -17,6 +17,10 @@ const nonnull = (x, message) => {
         return x;
     throw new Error(message ? message() : 'Unexpected null!');
 };
+const only = (xs) => {
+    assert(xs.length === 1);
+    return xs[0];
+};
 ;
 const Vec3 = {
     create: () => new Float64Array(3),
@@ -305,5 +309,5 @@ class Tensor3 {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-export { assert, drop, nonnull, Mat4, Tensor2, Tensor3, Vec3 };
+export { assert, drop, nonnull, only, Mat4, Tensor2, Tensor3, Vec3 };
 //# sourceMappingURL=base.js.map
