@@ -114,7 +114,6 @@ const heightmap = (x, z, blocks) => {
         ? height_ground + 64 * Math.pow((mgv7_mountain_ridge(x, z) - 1.25), 1.5)
         : height_ground;
     const height = (() => {
-        return 0;
         if (height_mountain > height_ground) {
             return height_mountain * mountain + height_ground * (1 - mountain);
         }

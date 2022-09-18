@@ -294,7 +294,7 @@ const generateParticles = (env, block, x, y, z, side) => {
         body.restitution = 0.5;
         const size = position.h;
         const mesh = env.meshes.add(particle);
-        const sprite = { url: 'images/rhodox-edited.png', size, x: int(16), y: int(16) };
+        const sprite = { url: 'images/frlg.png', size, x: int(16), y: int(16) };
         mesh.mesh = env.renderer.addSpriteMesh(sprite);
         mesh.mesh.setFrame(int(data.texture.x + 16 * data.texture.y));
         const epsilon = 0.01;
@@ -517,10 +517,10 @@ const hasDirectPath = (env, start, end) => {
     return true;
 };
 const findPath = (env, state, body) => {
-    const min = body.min;
-    const sx = int(Math.floor(min[0]));
+    const { min, max } = body;
+    const sx = int(Math.floor((min[0] + max[0]) / 2));
     const sy = int(Math.floor(min[1]));
-    const sz = int(Math.floor(min[2]));
+    const sz = int(Math.floor((min[2] + max[2]) / 2));
     const [tx, ty, tz] = nonnull(state.target);
     const path = AStar(new AStarPoint(sx, sy, sz), new AStarPoint(tx, ty, tz), p => !solid(env, p.x, p.y, p.z));
     if (path.length === 0)
@@ -772,7 +772,7 @@ const main = () => {
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {
-        const url = 'images/rhodox-edited.png';
+        const url = 'images/frlg.png';
         return { alphaTest, sparkle, url, x, y, w: int(16), h: int(16) };
     };
     const registry = env.registry;
