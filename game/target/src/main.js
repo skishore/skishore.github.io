@@ -437,7 +437,7 @@ const runInputs = (env, id) => {
         }
     }
     // Call any followers.
-    if (inputs.call) {
+    if (inputs.call || Math.random() < 1 / 4) {
         const body = env.physics.get(id);
         if (body) {
             const x = int(Math.floor((body.min[0] + body.max[0]) / 2));
@@ -535,10 +535,11 @@ const findPath = (env, state, body) => {
     }
     if (full.length > 1)
         result.push(full[full.length - 1]);
+    result.shift();
     state.path = result;
     state.path_index = 0;
     state.target = null;
-    console.log(state.path);
+    //console.log(state.path);
 };
 const PIDController = (error, derror, grounded) => {
     const dfactor = grounded ? 0.05 : 0.10;
@@ -600,8 +601,8 @@ const followPath = (env, state, body) => {
     const mesh = env.meshes.get(state.id);
     if (!mesh)
         return;
-    const vx = path_index > 0 ? cur[0] - path[path_index - 1][0] : cx;
-    const vz = path_index > 0 ? cur[2] - path[path_index - 1][2] : cz;
+    const vx = path_index > 0 ? cur[0] - path[path_index - 1][0] : dx;
+    const vz = path_index > 0 ? cur[2] - path[path_index - 1][2] : dz;
     mesh.heading = Math.atan2(vx, vz);
 };
 const runPathing = (env, state) => {
@@ -611,9 +612,9 @@ const runPathing = (env, state) => {
     if (!body)
         return;
     if (state.target)
-        return findPath(env, state, body);
+        findPath(env, state, body);
     if (state.path)
-        return followPath(env, state, body);
+        followPath(env, state, body);
 };
 const Pathing = (env) => ({
     init: () => ({
@@ -649,6 +650,7 @@ const Meshes = (env) => ({
             const lit = env.world.isBlockLit(int(Math.floor(x)), int(Math.floor(y)), int(Math.floor(z)));
             state.mesh.setPosition(x, y - h / 2, z);
             state.mesh.setLight(lit ? 1 : 0.64);
+            state.mesh.setHeight(h);
             if (state.heading !== null) {
                 const pos = env.renderer.camera.position;
                 const camera_heading = Math.atan2(x - pos[0], z - pos[2]);
@@ -746,7 +748,7 @@ const safeHeight = (position) => {
     }
     return height + 0.5 * (position.h + 1);
 };
-const addEntity = (env, image, x, z, h, w) => {
+const addEntity = (env, image, size, x, z, h, w) => {
     const entity = env.entities.addEntity();
     const position = env.position.add(entity);
     position.x = x + 0.5;
@@ -755,7 +757,7 @@ const addEntity = (env, image, x, z, h, w) => {
     position.h = h;
     position.y = safeHeight(position);
     const mesh = env.meshes.add(entity);
-    const sprite = { url: `images/${image}.png`, size: 1, x: int(32), y: int(32) };
+    const sprite = { url: `images/${image}.png`, size, x: int(32), y: int(32) };
     mesh.mesh = env.renderer.addSpriteMesh(sprite);
     mesh.columns = 3;
     env.physics.add(entity);
@@ -765,10 +767,11 @@ const addEntity = (env, image, x, z, h, w) => {
 };
 const main = () => {
     const env = new TypedEnv('container');
-    const player = addEntity(env, 'player', 1, 1, 0.8, 0.6);
+    const size = 1.5;
+    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8);
     env.inputs.add(player);
     env.target.add(player);
-    const follower = addEntity(env, 'follower', 1, 1, 0.5, 0.5);
+    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8);
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {
