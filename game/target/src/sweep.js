@@ -1,5 +1,5 @@
 import { int, Vec3 } from './base.js';
-const kSweepShift = 8;
+const kSweepShift = 12;
 const kSweepResolution = 1 << kSweepShift;
 const kSweepMask = kSweepResolution - 1;
 const kSpeeds = [0, 0, 0, 0];

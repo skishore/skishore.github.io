@@ -175,6 +175,10 @@ const AStarDrop = (p, check) => {
 const AStarAdjust = (p, y) => {
     return y === p.y ? p : new Point(p.x, y, p.z);
 };
+const AStarAdjustEndpoint = (p, check) => {
+    const y = AStarDrop(p, check);
+    return y >= p.y - 1 ? AStarAdjust(p, y) : p;
+};
 const AStarNeighbors = (source, check) => {
     const result = [];
     const { up, down } = Direction;
@@ -199,7 +203,8 @@ const AStar = (source, target, check, limit, record) => {
     //console.log(`AStar: ${source.toString()} -> ${target.toString()}`);
     let count = 0;
     limit = limit ? limit : AStarLimit;
-    target = AStarAdjust(target, AStarDrop(target, check));
+    source = AStarAdjustEndpoint(source, check);
+    target = AStarAdjustEndpoint(target, check);
     let best = null;
     const map = new Map();
     const heap = [];

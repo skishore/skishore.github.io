@@ -220,10 +220,11 @@ class Performance {
 //////////////////////////////////////////////////////////////////////////////
 const kTickResolution = 4;
 const kTicksPerFrame = 4;
-const kTicksPerSecond = 30;
+const kTicksPerSecond = 60;
 class Timing {
-    constructor(render, update) {
+    constructor(remesh, render, update) {
         this.now = performance || Date;
+        this.remesh = remesh;
         this.render = render;
         this.update = update;
         const now = this.now.now();
@@ -235,6 +236,7 @@ class Timing {
         this.updateLimit = this.updateDelay * kTicksPerFrame;
         const updateInterval = this.updateDelay / kTickResolution;
         setInterval(this.updateHandler.bind(this), updateInterval);
+        this.remeshPerf = new Performance(this.now, 60);
         this.renderPerf = new Performance(this.now, 60);
         this.updatePerf = new Performance(this.now, 60);
     }
@@ -242,17 +244,18 @@ class Timing {
         requestAnimationFrame(this.renderBinding);
         this.updateHandler();
         const now = this.now.now();
-        const dt = now - this.lastRender;
+        const dt = (now - this.lastRender) / 1000;
         this.lastRender = now;
-        const fraction = (now - this.lastUpdate) / this.updateDelay;
         try {
+            this.remeshPerf.begin();
+            this.remesh(dt);
+            this.remeshPerf.end();
             this.renderPerf.begin();
-            this.render(dt, fraction);
+            this.render(dt);
             this.renderPerf.end();
         }
         catch (e) {
-            this.render = () => { };
-            console.error(e);
+            this.onError(e);
         }
     }
     updateHandler() {
@@ -262,12 +265,11 @@ class Timing {
         while (this.lastUpdate + delay < now) {
             try {
                 this.updatePerf.begin();
-                this.update(delay);
+                this.update(delay / 1000);
                 this.updatePerf.end();
             }
             catch (e) {
-                this.update = () => { };
-                console.error(e);
+                this.onError(e);
             }
             this.lastUpdate += delay;
             now = this.now.now();
@@ -276,6 +278,10 @@ class Timing {
                 break;
             }
         }
+    }
+    onError(e) {
+        this.remesh = this.render = this.update = () => { };
+        console.error(e);
     }
 }
 ;
@@ -431,6 +437,8 @@ class Circle {
         this.mask = int((1 << shift) - 1);
     }
     center(center_x, center_z) {
+        if (center_x === this.center_x && center_z === this.center_z)
+            return;
         this.each((cx, cz) => {
             const ax = Math.abs(cx - center_x);
             const az = Math.abs(cz - center_z);
@@ -511,7 +519,7 @@ class Chunk {
         this.voxels = new Tensor3(kChunkWidth, kWorldHeight, kChunkWidth);
         this.heightmap = new Tensor2(kChunkWidth, kChunkWidth);
         this.light_map = new Tensor2(kChunkWidth, kChunkWidth);
-        this.equilevels = new Int16Array(kWorldHeight);
+        this.equilevels = new Int8Array(kWorldHeight);
         this.load(loader);
     }
     dispose() {
@@ -626,6 +634,9 @@ class Chunk {
     }
     dropMeshes() {
         var _a, _b;
+        if (this.hasMesh()) {
+            this.world.frontier.markDirty(0);
+        }
         (_a = this.solid) === null || _a === void 0 ? void 0 : _a.dispose();
         (_b = this.water) === null || _b === void 0 ? void 0 : _b.dispose();
         this.solid = null;
@@ -860,19 +871,22 @@ class LODMultiMesh {
 }
 ;
 class FrontierChunk {
-    constructor(cx, cz, level, mesh) {
+    constructor(cx, cz, level, mesh, frontier) {
         this.cx = cx;
         this.cz = cz;
         this.level = level;
         this.mesh = mesh;
+        this.frontier = frontier;
+        this.index = mesh.index(this);
     }
     dispose() {
-        const mesh = this.mesh;
-        mesh.disable(mesh.index(this));
+        if (this.hasMesh()) {
+            this.frontier.markDirty(int(this.level + 1));
+        }
+        this.mesh.disable(this.index);
     }
     hasMesh() {
-        const mesh = this.mesh;
-        return mesh.meshed[mesh.index(this)];
+        return this.mesh.meshed[this.index];
     }
 }
 ;
@@ -880,11 +894,13 @@ class Frontier {
     constructor(world) {
         this.world = world;
         this.meshes = new Map();
+        this.dirty = [];
         this.levels = [];
         let radius = (kChunkRadius | 0) + 0.5;
         for (let i = 0; i < kFrontierLevels; i++) {
             radius = (radius + kFrontierRadius) / 2;
             this.levels.push(new Circle(radius));
+            this.dirty.push(true);
         }
         assert(kChunkWidth % kFrontierLOD === 0);
         const side = int(kChunkWidth / kFrontierLOD);
@@ -900,12 +916,18 @@ class Frontier {
             level.center(cx, cz);
         }
     }
+    markDirty(level) {
+        if (level < this.dirty.length)
+            this.dirty[level] = true;
+    }
     remeshFrontier() {
         for (let i = int(0); i < kFrontierLevels; i++) {
             this.computeLODAtLevel(i);
         }
     }
     computeLODAtLevel(l) {
+        if (!this.dirty[l])
+            return;
         const world = this.world;
         const level = this.levels[l];
         const meshed = (dx, dz) => {
@@ -919,6 +941,7 @@ class Frontier {
             }
         };
         let counter = 0;
+        let skipped = false;
         level.each((cx, cz) => {
             let mask = int(0);
             for (let i = 0; i < 4; i++) {
@@ -930,6 +953,8 @@ class Frontier {
             const shown = mask !== 15;
             const extra = counter < kNumLODChunksToMeshPerFrame;
             const create = shown && (extra || mask !== 0);
+            if (shown && !create)
+                skipped = true;
             const existing = level.get(cx, cz);
             if (!existing && !create)
                 return false;
@@ -942,11 +967,13 @@ class Frontier {
             })();
             if (shown && !lod.hasMesh()) {
                 this.createLODMeshes(lod);
+                this.markDirty(int(l + 1));
                 counter++;
             }
             lod.mesh.show(lod.mesh.index(lod), mask);
             return false;
         });
+        this.dirty[l] = skipped;
     }
     createLODMeshes(chunk) {
         var _a, _b;
@@ -1014,7 +1041,14 @@ class Frontier {
     createFrontierChunk(cx, cz, level) {
         const bits = kMultiMeshBits;
         const mesh = this.getOrCreateMultiMesh(int(cx >> bits), int(cz >> bits), level);
-        return new FrontierChunk(cx, cz, level, mesh);
+        const result = new FrontierChunk(cx, cz, level, mesh, this);
+        // A FrontierChunk's mesh is just a fragment of data in its LODMultiMesh.
+        // That means that we may already have a mesh when we construct the chunk,
+        // if we previously disposed it without discarding data in the multi-mesh.
+        // We count this case as meshing a chunk and mark l + 1 dirty.
+        if (result.hasMesh())
+            this.markDirty(int(level + 1));
+        return result;
     }
     getOrCreateMultiMesh(cx, cz, level) {
         const shift = 12;
@@ -1054,7 +1088,7 @@ class World {
         this.buffer = new Tensor3(w, h, w);
         this.heightmap = new Tensor2(w, w);
         this.light_map = new Tensor2(w, w);
-        this.equilevels = new Int16Array(h);
+        this.equilevels = new Int8Array(h);
         this.equilevels[0] = this.equilevels[h - 1] = 1;
     }
     isBlockLit(x, y, z) {
@@ -1117,6 +1151,8 @@ class World {
             const chunk = chunks.get(cx, cz);
             if (!chunk || !chunk.needsRemesh())
                 return false;
+            if (!chunk.hasMesh())
+                frontier.markDirty(0);
             chunk.remeshChunk();
             meshed++;
             return false;
@@ -1145,7 +1181,6 @@ class Env {
         this.cameraBlock = kEmptyBlock;
         this.cameraColor = kWhite;
         this.highlightSide = -1;
-        this.shouldMesh = true;
         this.frame = 0;
         this.container = new Container(id);
         this.entities = new EntityComponentSystem();
@@ -1155,7 +1190,10 @@ class Env {
         this.highlight = this.world.mesher.meshHighlight();
         this.highlightMask = new Int32Array(2);
         this.highlightPosition = Vec3.create();
-        this.timing = new Timing(this.render.bind(this), this.update.bind(this));
+        const remesh = this.world.remesh.bind(this.world);
+        const render = this.render.bind(this);
+        const update = this.update.bind(this);
+        this.timing = new Timing(remesh, render, update);
     }
     getTargetedBlock() {
         return this.highlightSide < 0 ? null : this.highlightPosition;
@@ -1190,11 +1228,11 @@ class Env {
         this.updateHighlightMesh();
         this.updateOverlayColor(wave);
         const renderer_stats = this.renderer.render(move, wave);
-        this.shouldMesh = true;
         const timing = this.timing;
-        if (timing.updatePerf.frame() % 10 !== 0)
+        if (timing.renderPerf.frame() % 20 !== 0)
             return;
         const stats = `Update: ${this.formatStat(timing.updatePerf)}\r\n` +
+            `Remesh: ${this.formatStat(timing.remeshPerf)}\r\n` +
             `Render: ${this.formatStat(timing.renderPerf)}\r\n` +
             renderer_stats;
         this.container.displayStats(stats);
@@ -1203,10 +1241,6 @@ class Env {
         if (!this.container.inputs.pointer)
             return;
         this.entities.update(dt);
-        if (!this.shouldMesh)
-            return;
-        this.shouldMesh = false;
-        this.world.remesh();
     }
     formatStat(perf) {
         const format = (x) => (x / 1000).toFixed(2);

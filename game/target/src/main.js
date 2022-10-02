@@ -67,9 +67,8 @@ const flowWater = (env, water, points) => {
 };
 ;
 const Lifetime = {
-    init: () => ({ id: kNoEntity, index: int(0), lifetime: 0, cleanup: null }),
+    init: () => ({ id: kNoEntity, index: 0, lifetime: 0, cleanup: null }),
     onUpdate: (dt, states) => {
-        dt = dt / 1000;
         for (const state of states) {
             state.lifetime -= dt;
             if (state.lifetime < 0 && state.cleanup)
@@ -158,10 +157,12 @@ const runPhysics = (env, dt, state) => {
         const block = env.world.getBlock(x, y, z);
         return !env.registry.solid[block];
     };
-    const [x, y, z] = state.min;
-    const block = env.world.getBlock(int(Math.floor(x)), int(Math.floor(y)), int(Math.floor(z)));
+    const { min, max } = state;
+    const x = int(Math.floor((min[0] + max[0]) / 2));
+    const y = int(Math.floor(min[1]));
+    const z = int(Math.floor((min[2] + max[2]) / 2));
+    const block = env.world.getBlock(x, y, z);
     state.inFluid = block !== kEmptyBlock;
-    dt = dt / 1000;
     const drag = state.inFluid ? 2 : 0;
     const left = Math.max(1 - drag * dt, 0);
     const gravity = state.inFluid ? 0.25 : 1;
@@ -348,7 +349,6 @@ const tryToModifyBlock = (env, body, add) => {
     }
 };
 const runMovement = (env, dt, state) => {
-    dt = dt / 1000;
     const body = env.physics.getX(state.id);
     const grounded = body.resting[1] < 0;
     if (grounded)
@@ -437,12 +437,13 @@ const runInputs = (env, id) => {
         }
     }
     // Call any followers.
-    if (inputs.call || Math.random() < 1 / 4) {
+    if (inputs.call || Math.random() < 0.25) {
         const body = env.physics.get(id);
         if (body) {
-            const x = int(Math.floor((body.min[0] + body.max[0]) / 2));
-            const y = int(Math.floor((body.min[1] + body.max[1]) / 2));
-            const z = int(Math.floor((body.min[2] + body.max[2]) / 2));
+            const { min, max } = body;
+            const x = int(Math.floor((min[0] + max[0]) / 2));
+            const y = int(Math.floor(min[1]));
+            const z = int(Math.floor((min[2] + max[2]) / 2));
             env.pathing.each(other => other.target = [x, y, z]);
         }
         inputs.call = false;
@@ -533,17 +534,17 @@ const findPath = (env, state, body) => {
             continue;
         result.push(full[i - 1]);
     }
-    if (full.length > 1)
+    if (full.length > 1) {
         result.push(full[full.length - 1]);
-    result.shift();
+        result.shift();
+    }
     state.path = result;
     state.path_index = 0;
     state.target = null;
-    //console.log(state.path);
+    //console.log(JSON.stringify(state.path));
 };
-const PIDController = (error, derror, grounded) => {
-    const dfactor = grounded ? 0.05 : 0.10;
-    return 1.00 * error + dfactor * derror;
+const PIDController = (error, derror) => {
+    return 10.00 * error + 0.50 * derror;
 };
 const followPath = (env, state, body) => {
     const path = nonnull(state.path);
@@ -557,7 +558,7 @@ const followPath = (env, state, body) => {
     const node = path[state.path_index];
     const E = state.path_index + 1 === path.length
         ? 0.4 * (1 - (body.max[0] - body.min[0]))
-        : 0;
+        : -0.4 * (body.max[0] - body.min[0]);
     if (node[0] + E <= body.min[0] && body.max[0] <= node[0] + 1 - E &&
         node[1] + 0 <= body.min[1] && body.min[1] <= node[1] + 1 - 0 &&
         node[2] + E <= body.min[2] && body.max[2] <= node[2] + 1 - E) {
@@ -573,17 +574,20 @@ const followPath = (env, state, body) => {
     const cz = (body.min[2] + body.max[2]) / 2;
     const dx = cur[0] + 0.5 - cx;
     const dz = cur[2] + 0.5 - cz;
-    const grounded = body.resting[1] < 0;
-    let inputX = PIDController(dx, -body.vel[0], grounded);
-    let inputZ = PIDController(dz, -body.vel[2], grounded);
+    const penalty = body.inFluid ? movement.swimPenalty : 1;
+    const speed = penalty * movement.maxSpeed;
+    const inverse_speed = speed ? 1 / speed : 1;
+    let inputX = PIDController(dx, -body.vel[0]) * inverse_speed;
+    let inputZ = PIDController(dz, -body.vel[2]) * inverse_speed;
     const length = Math.sqrt(inputX * inputX + inputZ * inputZ);
     const normalization = length > 1 ? 1 / length : 1;
     movement.inputX = inputX * normalization;
     movement.inputZ = inputZ * normalization;
+    const grounded = body.resting[1] < 0;
     if (grounded)
         movement._jumped = false;
     movement.jumping = (() => {
-        if (node[1] > body.min[1])
+        if (cur[1] > body.min[1])
             return true;
         if (!grounded)
             return false;
@@ -592,7 +596,7 @@ const followPath = (env, state, body) => {
         const z = int(Math.floor(cz));
         const fx = cx - Math.floor(cx);
         const fz = cz - Math.floor(cz);
-        const J = 0.25, K = 1 - J;
+        const J = 0.5, K = 1 - J;
         return (dx > 1 && fx > K && !solid(env, int(x + 1), y, z)) ||
             (dx < -1 && fx < J && !solid(env, int(x - 1), y, z)) ||
             (dz > 1 && fz > K && !solid(env, x, y, int(z + 1))) ||
@@ -670,9 +674,9 @@ const Meshes = (env) => ({
             state.column = (() => {
                 if (!body.resting[1])
                     return 1;
-                const speed = Vec3.length(body.vel);
-                state.frame = speed ? (state.frame + 0.025 * speed) % 4 : 0;
-                if (!speed)
+                const distance = dt * Vec3.length(body.vel);
+                state.frame = distance ? (state.frame + 0.75 * distance) % 4 : 0;
+                if (!distance)
                     return 0;
                 const value = Math.floor(state.frame);
                 return value & 1 ? 0 : (value + 2) >> 1;
@@ -748,7 +752,7 @@ const safeHeight = (position) => {
     }
     return height + 0.5 * (position.h + 1);
 };
-const addEntity = (env, image, size, x, z, h, w) => {
+const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForce) => {
     const entity = env.entities.addEntity();
     const position = env.position.add(entity);
     position.x = x + 0.5;
@@ -756,22 +760,24 @@ const addEntity = (env, image, size, x, z, h, w) => {
     position.w = w;
     position.h = h;
     position.y = safeHeight(position);
+    const movement = env.movement.add(entity);
+    movement.maxSpeed = maxSpeed;
+    movement.moveForce = moveForce;
     const mesh = env.meshes.add(entity);
     const sprite = { url: `images/${image}.png`, size, x: int(32), y: int(32) };
     mesh.mesh = env.renderer.addSpriteMesh(sprite);
     mesh.columns = 3;
     env.physics.add(entity);
-    env.movement.add(entity);
     env.shadow.add(entity);
     return entity;
 };
 const main = () => {
     const env = new TypedEnv('container');
     const size = 1.5;
-    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8);
+    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8, 10, 40);
     env.inputs.add(player);
     env.target.add(player);
-    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8);
+    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8, 15, 60);
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {

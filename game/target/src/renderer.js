@@ -1253,7 +1253,7 @@ class Renderer {
         this.voxels_manager.atlas.sparkle();
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
-        const stats = { drawn: int(0), total: int(0) };
+        const stats = { drawn: 0, total: 0 };
         this.sprite_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
