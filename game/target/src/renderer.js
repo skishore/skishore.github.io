@@ -376,7 +376,7 @@ class SpriteAtlas {
         const w = image.width;
         const h = image.height;
         if (w % x !== 0 || h % y !== 0) {
-            throw new Error(`({w} x ${h}) image cannot fit (${x} x ${y}) frames.`);
+            throw new Error(`(${w} x ${h}) image cannot fit (${x} x ${y}) frames.`);
         }
         const cols = w / x, rows = h / y;
         const frames = cols * rows;
@@ -416,9 +416,7 @@ class Geometry {
         this.num_quads = num_quads;
         this.lower_bound = Vec3.create();
         this.upper_bound = Vec3.create();
-        this.bounds = Array(8).fill(null);
-        for (let i = 0; i < 8; i++)
-            this.bounds[i] = Vec3.create();
+        this.bounds = new Float64Array(24);
         this.dirty = true;
     }
     clear() {
@@ -443,7 +441,7 @@ class Geometry {
     computeBounds() {
         if (!this.dirty)
             return this.bounds;
-        const { lower_bound, upper_bound } = this;
+        const { bounds, lower_bound, upper_bound } = this;
         Vec3.set(lower_bound, Infinity, Infinity, Infinity);
         Vec3.set(upper_bound, -Infinity, -Infinity, -Infinity);
         const quads = this.quads;
@@ -477,9 +475,9 @@ class Geometry {
         }
         lower_bound[1] -= 1; // because of the vertical "wave" shift
         for (let i = 0; i < 8; i++) {
-            const bound = this.bounds[i];
+            const offset = 3 * i;
             for (let j = 0; j < 3; j++) {
-                bound[j] = (i & (1 << j)) ? upper_bound[j] : lower_bound[j];
+                bounds[offset + j] = (i & (1 << j)) ? upper_bound[j] : lower_bound[j];
             }
         }
         this.dirty = false;
@@ -518,11 +516,12 @@ Geometry.Stride = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
 class Buffer {
-    constructor(gl, length, freeList) {
+    constructor(gl, dynamic, length, freeList) {
         this.usage = 0;
         const buffer = nonnull(gl.createBuffer());
+        const mode = dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW;
         gl.bindBuffer(ARRAY_BUFFER, buffer);
-        gl.bufferData(ARRAY_BUFFER, length, gl.STATIC_DRAW);
+        gl.bufferData(ARRAY_BUFFER, length, mode);
         this.freeList = freeList;
         this.buffer = buffer;
         this.length = length;
@@ -535,20 +534,22 @@ class BufferAllocator {
         this.bytes_alloc = 0;
         this.bytes_usage = 0;
         this.gl = gl;
-        this.freeLists = new Array(32).fill(null).map(() => []);
+        this.freeListsStatics = new Array(32).fill(null).map(() => []);
+        this.freeListsDynamic = new Array(32).fill(null).map(() => []);
     }
-    alloc(data) {
+    alloc(data, dynamic) {
         const gl = this.gl;
         const bytes = int(4 * data.length);
         const sizeClass = this.sizeClass(bytes);
-        const freeList = this.freeLists[sizeClass];
+        const freeLists = dynamic ? this.freeListsDynamic : this.freeListsStatics;
+        const freeList = freeLists[sizeClass];
         const length = int(1 << sizeClass);
         let buffer = freeList.pop();
         if (buffer) {
             gl.bindBuffer(ARRAY_BUFFER, buffer.buffer);
         }
         else {
-            buffer = new Buffer(gl, length, freeList);
+            buffer = new Buffer(gl, dynamic, length, freeList);
             this.bytes_total += length;
         }
         buffer.usage = bytes;
@@ -597,8 +598,10 @@ class Mesh {
         const dz = position[2] - camera_position[2];
         for (const plane of planes) {
             const { x, y, z, index } = plane;
-            const bound = bounds[index];
-            const bx = bound[0], by = bound[1], bz = bound[2];
+            const offset = 3 * index;
+            const bx = bounds[offset + 0];
+            const by = bounds[offset + 1];
+            const bz = bounds[offset + 2];
             const value = (bx + dx) * x + (by + dy) * y + (bz + dz) * z;
             if (value < 0)
                 return true;
@@ -824,16 +827,16 @@ class VoxelMesh extends Mesh {
     prepareQuads(data) {
         const n = this.geo.num_quads * Geometry.Stride;
         const subarray = data.length > n ? data.subarray(0, n) : data;
-        this.quads = this.allocator.alloc(subarray);
+        this.quads = this.allocator.alloc(subarray, false);
     }
 }
 ;
 class VoxelManager {
-    constructor(gl) {
+    constructor(gl, allocator) {
         this.gl = gl;
+        this.allocator = allocator;
         this.shader = new VoxelShader(gl);
         this.atlas = new TextureAtlas(gl);
-        this.allocator = new BufferAllocator(gl);
         this.phases = [[], [], []];
     }
     addMesh(geo, phase) {
@@ -878,6 +881,227 @@ class VoxelManager {
                 gl.depthMask(true);
             gl.enable(gl.CULL_FACE);
             gl.disable(gl.BLEND);
+        }
+        stats.drawn += drawn;
+        stats.total += meshes.length;
+    }
+}
+;
+//////////////////////////////////////////////////////////////////////////////
+class Instance {
+    constructor(mesh, index) {
+        this.mesh = mesh;
+        this.index = index;
+    }
+    dispose() {
+        this.mesh.removeInstance(this.index);
+    }
+    setPosition(x, y, z) {
+        this.mesh.setInstancePosition(this.index, x, y, z);
+    }
+}
+;
+const kInstancedShader = `
+  uniform vec3 u_origin;
+  uniform vec4 u_billboard;
+  uniform mat4 u_transform;
+  in vec3 a_pos;
+  out vec2 v_uv;
+
+  void main() {
+    int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID & 1 : 0);
+
+    float w = float(((index + 1) & 3) >> 1);
+    float h = float(((index + 0) & 3) >> 1);
+    v_uv = vec2(w, 1.0 - h);
+
+    float y = 0.5;
+    vec3 v0 = vec3(w - 0.5, h, 0.0);
+    vec3 v1 = vec3(v0[0],
+                   (v0[1] - y) * u_billboard[2] + y,
+                   (v0[1] - y) * u_billboard[3]);
+    vec3 v2 = vec3(v1[0] * u_billboard[0] - v1[2] * u_billboard[1],
+                   v1[1],
+                   v1[0] * u_billboard[1] + v1[2] * u_billboard[0]);
+    gl_Position = u_transform * vec4(v2 + (a_pos - u_origin), 1.0);
+  }
+#split
+  uniform float u_frame;
+  uniform sampler2DArray u_texture;
+  in vec2 v_uv;
+  out vec4 o_color;
+
+  void main() {
+    o_color = texture(u_texture, vec3(v_uv, u_frame));
+    if (o_color[3] < 0.5) discard;
+  }
+`;
+class InstancedShader extends Shader {
+    constructor(gl) {
+        super(gl, kInstancedShader);
+        this.u_frame = this.getUniformLocation('u_frame');
+        this.u_origin = this.getUniformLocation('u_origin');
+        this.u_billboard = this.getUniformLocation('u_billboard');
+        this.u_transform = this.getUniformLocation('u_transform');
+        this.a_pos = this.getAttribLocation('a_pos');
+    }
+}
+;
+class InstancedMesh extends Mesh {
+    constructor(manager, meshes, frame, sprite) {
+        super(manager, meshes);
+        this.buffer = null;
+        this.vao = null;
+        this.manager = manager;
+        this.texture = manager.atlas.addSprite(sprite);
+        this.frame = frame;
+        this.sprite = sprite;
+        this.data = new Float32Array(4 * InstancedMesh.Stride);
+        this.dirtyInstances = new Set();
+        this.instances = [];
+    }
+    draw(transform, stats) {
+        const { data, gl, shader } = this;
+        const n = this.instances.length;
+        if (n === 0)
+            return false;
+        this.prepareBuffers();
+        gl.bindVertexArray(this.vao);
+        gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
+        gl.uniform1f(shader.u_frame, this.frame);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, n * 2);
+        stats.drawnInstances += n;
+        stats.totalInstances += this.capacity();
+        return true;
+    }
+    addInstance() {
+        const capacity = this.capacity();
+        const instances = this.instances;
+        assert(instances.length <= capacity);
+        if (instances.length === capacity) {
+            this.destroyBuffers();
+            const data = new Float32Array(2 * this.data.length);
+            data.set(this.data);
+            this.data = data;
+            assert(instances.length < this.capacity());
+        }
+        const index = int(instances.length);
+        const instance = new Instance(this, index);
+        this.setInstancePosition(index, 0, 0, 0);
+        instances.push(instance);
+        return instance;
+    }
+    removeInstance(index) {
+        const instances = this.instances;
+        const popped = instances.pop();
+        assert(popped.index === instances.length);
+        if (popped.index === index)
+            return;
+        const data = this.data;
+        const stride = InstancedMesh.Stride;
+        const source = stride * popped.index;
+        const target = stride * index;
+        for (let i = 0; i < stride; i++) {
+            data[target + i] = data[source + i];
+        }
+        this.dirtyInstances.add(index);
+        instances[index] = popped;
+        popped.index = index;
+    }
+    setInstancePosition(index, x, y, z) {
+        const offset = index * InstancedMesh.Stride;
+        const data = nonnull(this.data);
+        data[offset + 0] = x;
+        data[offset + 1] = y;
+        data[offset + 2] = z;
+        this.dirtyInstances.add(index);
+    }
+    capacity() {
+        const length = this.data.length;
+        const stride = InstancedMesh.Stride;
+        assert(length % stride === 0);
+        return int(length / stride);
+    }
+    destroyBuffers() {
+        const { buffer, gl, vao } = this;
+        gl.deleteVertexArray(vao);
+        if (buffer)
+            this.manager.allocator.free(buffer);
+        this.vao = null;
+        this.buffer = null;
+    }
+    prepareBuffers() {
+        const { buffer, data, dirtyInstances, gl, shader } = this;
+        if (!buffer) {
+            this.buffer = this.manager.allocator.alloc(data, true);
+        }
+        else if (dirtyInstances.size > 64) {
+            gl.bindBuffer(ARRAY_BUFFER, buffer.buffer);
+            gl.bufferSubData(ARRAY_BUFFER, 0, data, 0, data.length);
+            dirtyInstances.clear();
+        }
+        else if (dirtyInstances.size > 0) {
+            const stride = InstancedMesh.Stride;
+            gl.bindBuffer(ARRAY_BUFFER, buffer.buffer);
+            for (const index of dirtyInstances.values()) {
+                const offset = index * stride;
+                gl.bufferSubData(ARRAY_BUFFER, 4 * offset, data, offset, stride);
+            }
+            dirtyInstances.clear();
+        }
+        if (this.vao)
+            return;
+        this.vao = nonnull(gl.createVertexArray());
+        gl.bindVertexArray(this.vao);
+        gl.bindBuffer(ARRAY_BUFFER, nonnull(this.buffer).buffer);
+        this.prepareAttribute(shader.a_pos, 3, 0);
+    }
+    prepareAttribute(location, size, offset_in_floats) {
+        if (location === null)
+            return;
+        const gl = this.gl;
+        const offset = 4 * offset_in_floats;
+        const stride = 4 * InstancedMesh.Stride;
+        gl.enableVertexAttribArray(location);
+        gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+        gl.vertexAttribDivisor(location, 2);
+    }
+}
+InstancedMesh.Stride = 3;
+;
+class InstancedManager {
+    constructor(gl, allocator, atlas) {
+        this.gl = gl;
+        this.allocator = allocator;
+        this.atlas = atlas;
+        this.shader = new InstancedShader(gl);
+        this.billboard = new Float32Array(4);
+        this.origin_32 = new Float32Array(3);
+        this.meshes = [];
+        this.origin = Vec3.create();
+    }
+    addMesh(frame, sprite) {
+        return new InstancedMesh(this, this.meshes, frame, sprite);
+    }
+    render(camera, planes, stats) {
+        const { billboard, gl, meshes, origin, origin_32, shader } = this;
+        let drawn = 0;
+        origin_32[0] = origin[0] = Math.floor(camera.position[0]);
+        origin_32[1] = origin[1] = Math.floor(camera.position[1]);
+        origin_32[2] = origin[2] = Math.floor(camera.position[2]);
+        const transform = camera.getTransformFor(origin);
+        shader.bind();
+        const pitch = -0.33 * camera.pitch;
+        billboard[0] = Math.cos(camera.heading);
+        billboard[1] = -Math.sin(camera.heading);
+        billboard[2] = Math.cos(pitch);
+        billboard[3] = -Math.sin(pitch);
+        gl.uniform3fv(shader.u_origin, origin_32);
+        gl.uniform4fv(shader.u_billboard, billboard);
+        gl.uniformMatrix4fv(shader.u_transform, false, transform);
+        for (const mesh of meshes) {
+            if (mesh.draw(transform, stats))
+                drawn++;
         }
         stats.drawn += drawn;
         stats.total += meshes.length;
@@ -940,14 +1164,14 @@ class SpriteShader extends Shader {
 }
 ;
 class SpriteMesh extends Mesh {
-    constructor(manager, meshes, sprite) {
+    constructor(manager, meshes, size, sprite) {
         super(manager, meshes);
         this.enabled = true;
         this.frame = 0;
         this.light = 1;
         this.manager = manager;
-        this.size = sprite.size;
-        this.height = sprite.size;
+        this.size = size;
+        this.height = size;
         this.stuv = new Float32Array(4);
         this.stuv[2] = 1;
         this.stuv[3] = 1;
@@ -993,32 +1217,32 @@ class SpriteMesh extends Mesh {
 }
 ;
 class SpriteManager {
-    constructor(gl) {
+    constructor(gl, atlas) {
         this.gl = gl;
+        this.atlas = atlas;
         this.shader = new SpriteShader(gl);
-        this.atlas = new SpriteAtlas(gl);
         this.billboard = new Float32Array(4);
-        this.bounds = Array(8).fill(null).map(() => Vec3.create());
+        this.bounds = new Float64Array(24);
         this.meshes = [];
     }
-    addMesh(sprite) {
-        return new SpriteMesh(this, this.meshes, sprite);
+    addMesh(size, sprite) {
+        return new SpriteMesh(this, this.meshes, size, sprite);
     }
     getBounds(size) {
         const result = this.bounds;
         const half_size = 0.5 * size;
         for (let i = 0; i < 8; i++) {
-            const bound = result[i];
-            bound[0] = (i & 1) ? half_size : -half_size;
-            bound[1] = (i & 2) ? size : 0;
-            bound[2] = (i & 4) ? half_size : -half_size;
+            const offset = 3 * i;
+            result[offset + 0] = (i & 1) ? half_size : -half_size;
+            result[offset + 1] = (i & 2) ? size : 0;
+            result[offset + 2] = (i & 4) ? half_size : -half_size;
         }
         return result;
     }
     render(camera, planes, stats) {
-        const { billboard, gl, shader } = this;
+        const { billboard, gl, meshes, shader } = this;
         let drawn = 0;
-        // All sprite meshes are alpha-tested for now.
+        // All sprite meshes are alpha-tested, for now.
         shader.bind();
         const pitch = -0.33 * camera.pitch;
         billboard[0] = Math.cos(camera.heading);
@@ -1026,12 +1250,12 @@ class SpriteManager {
         billboard[2] = Math.cos(pitch);
         billboard[3] = -Math.sin(pitch);
         gl.uniform4fv(shader.u_billboard, billboard);
-        for (const mesh of this.meshes) {
+        for (const mesh of meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
         stats.drawn += drawn;
-        stats.total += this.meshes.length;
+        stats.total += meshes.length;
     }
 }
 ;
@@ -1100,7 +1324,7 @@ class ShadowManager {
     constructor(gl) {
         this.gl = gl;
         this.shader = new ShadowShader(gl);
-        this.bounds = Array(8).fill(null).map(() => Vec3.create());
+        this.bounds = new Float64Array(24);
         this.meshes = [];
     }
     addMesh() {
@@ -1110,27 +1334,27 @@ class ShadowManager {
         const result = this.bounds;
         const half_size = 0.5 * size;
         for (let i = 0; i < 8; i++) {
-            const bound = result[i];
-            bound[0] = (i & 1) ? size : -size;
-            bound[2] = (i & 4) ? size : -size;
+            const offset = 3 * i;
+            result[offset + 0] = (i & 1) ? size : -size;
+            result[offset + 2] = (i & 4) ? size : -size;
         }
         return result;
     }
     render(camera, planes, stats) {
-        const { gl, shader } = this;
+        const { gl, meshes, shader } = this;
         let drawn = 0;
-        // All sprite meshes are alpha-blended.
+        // All shadow meshes are alpha-blended.
         shader.bind();
         gl.depthMask(false);
         gl.enable(gl.BLEND);
-        for (const mesh of this.meshes) {
+        for (const mesh of meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
         gl.disable(gl.BLEND);
         gl.depthMask(true);
         stats.drawn += drawn;
-        stats.total += this.meshes.length;
+        stats.total += meshes.length;
     }
 }
 ;
@@ -1208,6 +1432,7 @@ class ScreenOverlay {
 ;
 ;
 ;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
@@ -1227,20 +1452,27 @@ class Renderer {
         gl.cullFace(gl.BACK);
         gl.disable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        const allocator = new BufferAllocator(gl);
+        const atlas = new SpriteAtlas(gl);
+        this.allocator = allocator;
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl);
+        this.instanced_manager = new InstancedManager(gl, allocator, atlas);
         this.shadow_manager = new ShadowManager(gl);
-        this.sprite_manager = new SpriteManager(gl);
-        this.voxels_manager = new VoxelManager(gl);
+        this.sprite_manager = new SpriteManager(gl, atlas);
+        this.voxels_manager = new VoxelManager(gl, allocator);
     }
     addTexture(texture) {
         return this.voxels_manager.atlas.addTexture(texture);
     }
+    addInstancedMesh(frame, sprite) {
+        return this.instanced_manager.addMesh(frame, sprite);
+    }
     addShadowMesh() {
         return this.shadow_manager.addMesh();
     }
-    addSpriteMesh(sprite) {
-        return this.sprite_manager.addMesh(sprite);
+    addSpriteMesh(size, sprite) {
+        return this.sprite_manager.addMesh(size, sprite);
     }
     addVoxelMesh(geo, phase) {
         return this.voxels_manager.addMesh(geo, phase);
@@ -1253,15 +1485,17 @@ class Renderer {
         this.voxels_manager.atlas.sparkle();
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
-        const stats = { drawn: 0, total: 0 };
+        const stats = { drawn: 0, total: 0, drawnInstances: 0, totalInstances: 0 };
         this.sprite_manager.render(camera, planes, stats);
+        this.instanced_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
         this.shadow_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 2);
         overlay.draw();
-        return `${this.voxels_manager.allocator.stats()}\r\n` +
-            `Draw calls: ${stats.drawn} / ${stats.total}`;
+        return `${this.allocator.stats()}\r\n` +
+            `Draw calls: ${stats.drawn} / ${stats.total}\r\n` +
+            `Instances: ${stats.drawnInstances} / ${stats.totalInstances}`;
     }
     setOverlayColor(color) {
         this.overlay.setColor(color);

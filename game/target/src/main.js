@@ -1,6 +1,6 @@
 import { int, nonnull, Vec3 } from './base.js';
 import { Env } from './engine.js';
-import { kEmptyBlock, kWorldHeight } from './engine.js';
+import { kEmptyBlock, kNoMaterial, kWorldHeight } from './engine.js';
 import { kNoEntity } from './ecs.js';
 import { AStar, Point as AStarPoint } from './pathing.js';
 import { sweep } from './sweep.js';
@@ -271,21 +271,31 @@ const handleRunning = (dt, state, body, grounded) => {
     Vec3.add(body.forces, body.forces, kTmpPush);
 };
 const generateParticles = (env, block, x, y, z, side) => {
-    const adjusted = side === 2 || side === 3 ? 0 : side;
-    const material = env.registry.getBlockFaceMaterial(block, adjusted);
-    const data = env.registry.getMaterialData(material);
-    if (!data.texture)
+    const texture = (() => {
+        const mesh = env.registry.getBlockMesh(block);
+        if (mesh) {
+            const { frame, sprite: { url, x: w, y: h } } = mesh;
+            const x = frame % w, y = Math.floor(frame / w);
+            return { alphaTest: true, sparkle: false, url, x, y, w, h };
+        }
+        const adjusted = side === 2 || side === 3 ? 0 : side;
+        const material = env.registry.getBlockFaceMaterial(block, adjusted);
+        if (material === kNoMaterial)
+            return;
+        return env.registry.getMaterialData(material).texture;
+    })();
+    if (!texture)
         return;
     const count = Math.min(kNumParticles, kMaxNumParticles - env.particles);
     env.particles += count;
     for (let i = 0; i < count; i++) {
         const particle = env.entities.addEntity();
         const position = env.position.add(particle);
-        const side = Math.floor(3 * Math.random() + 1) / 16;
-        position.x = x + (1 - side) * Math.random() + side / 2;
-        position.y = y + (1 - side) * Math.random() + side / 2;
-        position.z = z + (1 - side) * Math.random() + side / 2;
-        position.w = position.h = side;
+        const size = Math.floor(3 * Math.random() + 1) / 16;
+        position.x = x + (1 - size) * Math.random() + size / 2;
+        position.y = y + (1 - size) * Math.random() + size / 2;
+        position.z = z + (1 - size) * Math.random() + size / 2;
+        position.w = position.h = size;
         const kParticleSpeed = 8;
         const body = env.physics.add(particle);
         body.impulses[0] = kParticleSpeed * (Math.random() - 0.5);
@@ -293,15 +303,14 @@ const generateParticles = (env, block, x, y, z, side) => {
         body.impulses[2] = kParticleSpeed * (Math.random() - 0.5);
         body.friction = 10;
         body.restitution = 0.5;
-        const size = position.h;
         const mesh = env.meshes.add(particle);
-        const sprite = { url: 'images/frlg.png', size, x: int(16), y: int(16) };
-        mesh.mesh = env.renderer.addSpriteMesh(sprite);
-        mesh.mesh.setFrame(int(data.texture.x + 16 * data.texture.y));
+        const sprite = { url: texture.url, x: texture.w, y: texture.h };
+        mesh.mesh = env.renderer.addSpriteMesh(size, sprite);
+        mesh.mesh.setFrame(int(texture.x + texture.y * texture.w));
         const epsilon = 0.01;
-        const s = Math.floor(16 * (1 - side) * Math.random()) / 16;
-        const t = Math.floor(16 * (1 - side) * Math.random()) / 16;
-        const uv = side - 2 * epsilon;
+        const s = Math.floor(16 * (1 - size) * Math.random()) / 16;
+        const t = Math.floor(16 * (1 - size) * Math.random()) / 16;
+        const uv = size - 2 * epsilon;
         mesh.mesh.setSTUV(s + epsilon, t + epsilon, uv, uv);
         const lifetime = env.lifetime.add(particle);
         lifetime.lifetime = 1.0 * Math.random() + 0.5;
@@ -523,6 +532,8 @@ const findPath = (env, state, body) => {
     const sy = int(Math.floor(min[1]));
     const sz = int(Math.floor((min[2] + max[2]) / 2));
     const [tx, ty, tz] = nonnull(state.target);
+    if (body.resting[1] >= 0 && body.vel[1] > 0)
+        return;
     const path = AStar(new AStarPoint(sx, sy, sz), new AStarPoint(tx, ty, tz), p => !solid(env, p.x, p.y, p.z));
     if (path.length === 0)
         return;
@@ -543,8 +554,9 @@ const findPath = (env, state, body) => {
     state.target = null;
     //console.log(JSON.stringify(state.path));
 };
-const PIDController = (error, derror) => {
-    return 10.00 * error + 0.50 * derror;
+const PIDController = (error, derror, grounded) => {
+    const dfactor = grounded ? 1.00 : 2.00;
+    return 20.00 * error + dfactor * derror;
 };
 const followPath = (env, state, body) => {
     const path = nonnull(state.path);
@@ -555,13 +567,15 @@ const followPath = (env, state, body) => {
     const movement = env.movement.get(state.id);
     if (!movement)
         return;
+    const grounded = body.resting[1] < 0;
     const node = path[state.path_index];
     const E = state.path_index + 1 === path.length
         ? 0.4 * (1 - (body.max[0] - body.min[0]))
         : -0.4 * (body.max[0] - body.min[0]);
     if (node[0] + E <= body.min[0] && body.max[0] <= node[0] + 1 - E &&
         node[1] + 0 <= body.min[1] && body.min[1] <= node[1] + 1 - 0 &&
-        node[2] + E <= body.min[2] && body.max[2] <= node[2] + 1 - E) {
+        node[2] + E <= body.min[2] && body.max[2] <= node[2] + 1 - E &&
+        grounded) {
         state.path_index++;
     }
     const path_index = state.path_index;
@@ -577,13 +591,12 @@ const followPath = (env, state, body) => {
     const penalty = body.inFluid ? movement.swimPenalty : 1;
     const speed = penalty * movement.maxSpeed;
     const inverse_speed = speed ? 1 / speed : 1;
-    let inputX = PIDController(dx, -body.vel[0]) * inverse_speed;
-    let inputZ = PIDController(dz, -body.vel[2]) * inverse_speed;
+    let inputX = PIDController(dx, -body.vel[0], grounded) * inverse_speed;
+    let inputZ = PIDController(dz, -body.vel[2], grounded) * inverse_speed;
     const length = Math.sqrt(inputX * inputX + inputZ * inputZ);
     const normalization = length > 1 ? 1 / length : 1;
     movement.inputX = inputX * normalization;
     movement.inputZ = inputZ * normalization;
-    const grounded = body.resting[1] < 0;
     if (grounded)
         movement._jumped = false;
     movement.jumping = (() => {
@@ -672,7 +685,7 @@ const Meshes = (env) => ({
             if (!body)
                 return;
             state.column = (() => {
-                if (!body.resting[1])
+                if (body.resting[1] >= 0)
                     return 1;
                 const distance = dt * Vec3.length(body.vel);
                 state.frame = distance ? (state.frame + 0.75 * distance) % 4 : 0;
@@ -752,7 +765,7 @@ const safeHeight = (position) => {
     }
     return height + 0.5 * (position.h + 1);
 };
-const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForce) => {
+const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor) => {
     const entity = env.entities.addEntity();
     const position = env.position.add(entity);
     position.x = x + 0.5;
@@ -762,10 +775,10 @@ const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForce) => {
     position.y = safeHeight(position);
     const movement = env.movement.add(entity);
     movement.maxSpeed = maxSpeed;
-    movement.moveForce = moveForce;
+    movement.moveForce = maxSpeed * moveForceFactor;
     const mesh = env.meshes.add(entity);
-    const sprite = { url: `images/${image}.png`, size, x: int(32), y: int(32) };
-    mesh.mesh = env.renderer.addSpriteMesh(sprite);
+    const sprite = { url: `images/${image}.png`, x: int(32), y: int(32) };
+    mesh.mesh = env.renderer.addSpriteMesh(size, sprite);
     mesh.columns = 3;
     env.physics.add(entity);
     env.shadow.add(entity);
@@ -774,26 +787,30 @@ const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForce) => {
 const main = () => {
     const env = new TypedEnv('container');
     const size = 1.5;
-    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8, 10, 40);
+    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8, 10, 4);
     env.inputs.add(player);
     env.target.add(player);
-    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8, 15, 60);
+    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8, 15, 8);
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {
         const url = 'images/frlg.png';
-        return { alphaTest, sparkle, url, x, y, w: int(16), h: int(16) };
+        return { alphaTest, sparkle, url, x, y, w: 16, h: 16 };
+    };
+    const block = (x, y) => {
+        const url = 'images/frlg.png';
+        const frame = int(x + 16 * y);
+        return env.renderer.addInstancedMesh(frame, { url, x: 16, y: 16 });
     };
     const registry = env.registry;
     registry.addMaterialOfColor('blue', [0.1, 0.1, 0.4, 0.6], true);
     registry.addMaterialOfTexture('water', texture(13, 12, false, true), [1, 1, 1, 0.8], true);
-    registry.addMaterialOfTexture('leaves', texture(4, 3, true));
     const textures = [
         ['bedrock', 1, 1],
         ['dirt', 2, 0],
         ['grass', 0, 0],
         ['grass-side', 3, 0],
-        ['rock', 1, 0],
+        ['stone', 1, 0],
         ['sand', 0, 11],
         ['snow', 2, 4],
         ['trunk', 5, 1],
@@ -804,12 +821,13 @@ const main = () => {
     }
     const blocks = {
         bedrock: registry.addBlock(['bedrock'], true),
+        bush: registry.addBlockMesh(block(4, 3), true),
         dirt: registry.addBlock(['dirt'], true),
         grass: registry.addBlock(['grass', 'dirt', 'grass-side'], true),
-        leaves: registry.addBlock(['leaves'], true),
-        rock: registry.addBlock(['rock'], true),
+        rock: registry.addBlockMesh(block(1, 3), true),
         sand: registry.addBlock(['sand'], true),
         snow: registry.addBlock(['snow'], true),
+        stone: registry.addBlock(['stone'], true),
         trunk: registry.addBlock(['trunk', 'trunk-side'], true),
         water: registry.addBlock(['water', 'blue', 'blue'], false),
     };

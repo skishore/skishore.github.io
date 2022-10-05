@@ -365,8 +365,10 @@ class TerrainMesher {
         const base_y = pos[1];
         const base_z = pos[2];
         const water = voxels.get(int(base_x + 1), int(base_y), int(base_z + 1));
-        const sides = this.getBlockFaceMaterial(water, 0);
-        const material = this.getMaterialData(sides);
+        const id = this.getBlockFaceMaterial(water, 0);
+        if (id === kNoMaterial)
+            return;
+        const material = this.getMaterialData(id);
         const patch = (x, z, face) => {
             const ax = int(base_x + x + 1);
             const az = int(base_z + z + 1);
@@ -449,7 +451,10 @@ class TerrainMesher {
                 const offset = kHeightmapFields * (x + z * sx);
                 const block = heightmap[offset + 0];
                 const height = heightmap[offset + 1];
-                if (block === kEmptyBlock || (block & kSentinel))
+                if (block & kSentinel)
+                    continue;
+                const id = this.getBlockFaceMaterial(block, 2);
+                if (id === kNoMaterial)
                     continue;
                 const lx = sx - x, lz = sz - z;
                 let w = 1, h = 1;
@@ -468,11 +473,8 @@ class TerrainMesher {
                             break OUTER;
                     }
                 }
-                const d = 1;
-                const face = int(2 * d);
-                const id = this.getBlockFaceMaterial(block, face);
-                const material = this.getMaterialData(id);
                 Vec3.set(kTmpPos, x * scale, height, z * scale);
+                const material = this.getMaterialData(id);
                 const sw = scale * w, sh = scale * h;
                 const wave = material.liquid ? 0b1111 : 0;
                 this.addQuad(geo, material, 1, 0, 1, wave, 1, sw, sh, kTmpPos);
@@ -503,7 +505,12 @@ class TerrainMesher {
                 for (let j = 0; j < lj; j++, offset += sj) {
                     const block = heightmap[offset + 0];
                     const height = heightmap[offset + 1];
-                    if (block === kEmptyBlock)
+                    // We could use the material at the side of the block with:
+                    //  const face = 2 * d + ((1 - dir) >> 1);
+                    //
+                    // But doing so muddles grass, etc. textures at a distance.
+                    const id = this.getBlockFaceMaterial(block, 2);
+                    if (id === kNoMaterial)
                         continue;
                     const neighbor = heightmap[offset + 1 + di];
                     if (neighbor >= height)
@@ -522,11 +529,6 @@ class TerrainMesher {
                     const wi = d === 0 ? height - neighbor : scale * w;
                     const hi = d === 0 ? scale * w : height - neighbor;
                     Vec3.set(kTmpPos, px, neighbor, pz);
-                    // We could use the material at the side of the block with:
-                    //  const face = 2 * d + ((1 - dir) >> 1);
-                    //
-                    // But doing so muddles grass, etc. textures at a distance.
-                    const id = this.getBlockFaceMaterial(block, 2);
                     const material = this.getMaterialData(id);
                     const wave = material.liquid ? 0b1111 : 0;
                     this.addQuad(geo, material, dir, ao, 1, wave, d, wi, hi, kTmpPos);
@@ -604,33 +606,70 @@ class TerrainMesher {
         return (a10 === a01) ? false : (a00 + a11 > a10 + a01);
     }
     packAOMask(data, ipos, ineg, dj, dk) {
+        const { opaque, solid } = this;
+        if (solid[data[ipos]])
+            return int(0b01010101);
         let a00 = 0;
         let a01 = 0;
         let a10 = 0;
         let a11 = 0;
-        if (this.solid[data[ipos + dj]]) {
+        const b0 = data[ipos + dj];
+        const b1 = data[ipos - dj];
+        const b2 = data[ipos + dk];
+        const b3 = data[ipos - dk];
+        // Optimize for the special case of completely unoccluded blocks.
+        if (b0 + b1 + b2 + b3 === kEmptyBlock) {
+            const d0 = data[ipos - dj - dk];
+            const d1 = data[ipos - dj + dk];
+            const d2 = data[ipos + dj - dk];
+            const d3 = data[ipos + dj + dk];
+            if (d0 + d1 + d2 + d3 === kEmptyBlock)
+                return 0;
+            if (solid[d0])
+                a00++;
+            if (solid[d1])
+                a01++;
+            if (solid[d2])
+                a10++;
+            if (solid[d3])
+                a11++;
+            return ((a01 << 6) | (a11 << 4) | (a10 << 2) | a00);
+        }
+        if (solid[b0]) {
             a10++;
             a11++;
         }
-        if (this.solid[data[ipos - dj]]) {
+        if (solid[b1]) {
             a00++;
             a01++;
         }
-        if (this.solid[data[ipos + dk]]) {
+        if (solid[b2]) {
             a01++;
             a11++;
         }
-        if (this.solid[data[ipos - dk]]) {
+        if (solid[b3]) {
             a00++;
             a10++;
         }
-        if (a00 === 0 && this.solid[data[ipos - dj - dk]])
+        if (solid[b0] && !opaque[b0]) {
+            a10 = a11 = 1;
+        }
+        if (solid[b1] && !opaque[b1]) {
+            a00 = a01 = 1;
+        }
+        if (solid[b2] && !opaque[b2]) {
+            a01 = a11 = 1;
+        }
+        if (solid[b3] && !opaque[b3]) {
+            a00 = a10 = 1;
+        }
+        if (a00 === 0 && solid[data[ipos - dj - dk]])
             a00++;
-        if (a01 === 0 && this.solid[data[ipos - dj + dk]])
+        if (a01 === 0 && solid[data[ipos - dj + dk]])
             a01++;
-        if (a10 === 0 && this.solid[data[ipos + dj - dk]])
+        if (a10 === 0 && solid[data[ipos + dj - dk]])
             a10++;
-        if (a11 === 0 && this.solid[data[ipos + dj + dk]])
+        if (a11 === 0 && solid[data[ipos + dj + dk]])
             a11++;
         // Order here matches the order in which we push vertices in addQuad.
         return ((a01 << 6) | (a11 << 4) | (a10 << 2) | a00);

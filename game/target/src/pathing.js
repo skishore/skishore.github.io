@@ -179,9 +179,14 @@ const AStarAdjustEndpoint = (p, check) => {
     const y = AStarDrop(p, check);
     return y >= p.y - 1 ? AStarAdjust(p, y) : p;
 };
-const AStarNeighbors = (source, check) => {
+const AStarNeighbors = (source, check, first) => {
     const result = [];
     const { up, down } = Direction;
+    if (first) {
+        const y = AStarDrop(source, check);
+        if (y !== source.y)
+            result.push(new Point(source.x, y, source.z));
+    }
     for (const dir of Direction.cardinal) {
         const next = source.add(dir);
         const ny = AStarHeight(source, next, check);
@@ -201,7 +206,7 @@ const AStarNeighbors = (source, check) => {
 };
 const AStar = (source, target, check, limit, record) => {
     //console.log(`AStar: ${source.toString()} -> ${target.toString()}`);
-    let count = 0;
+    let count = int(0);
     limit = limit ? limit : AStarLimit;
     source = AStarAdjustEndpoint(source, check);
     target = AStarAdjustEndpoint(target, check);
@@ -218,12 +223,12 @@ const AStar = (source, target, check, limit, record) => {
         //console.log(`  ${count}: ${cur.toString()}: distance = ${cur.distance}, score = ${cur.score}`);
         if (record)
             record.push(cur);
-        count++;
+        count = int(count + 1);
         if (cur.equal(target)) {
             best = cur;
             break;
         }
-        for (const next of AStarNeighbors(cur, check)) {
+        for (const next of AStarNeighbors(cur, check, count === 1)) {
             const dy = next.y - cur.y;
             const xz = Math.abs(next.x - cur.x) + Math.abs(next.z - cur.z);
             const ud = dy * (dy > 0 ? AStarUpCost : -AStarDownCost);

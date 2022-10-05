@@ -114,6 +114,7 @@ class Container {
 }
 ;
 ;
+;
 const kBlack = [0, 0, 0, 1];
 const kWhite = [1, 1, 1, 1];
 const kNoMaterial = 0;
@@ -127,6 +128,7 @@ class Registry {
         for (let i = 0; i < 12; i++) {
             this.faces.push(kNoMaterial);
         }
+        this.meshes = [null, null];
         this.materials = [];
         this.ids = new Map();
     }
@@ -161,6 +163,16 @@ class Registry {
         const result = this.opaque.length;
         this.opaque.push(opaque);
         this.solid.push(solid);
+        this.meshes.push(null);
+        return result;
+    }
+    addBlockMesh(mesh, solid) {
+        const result = this.opaque.length;
+        for (let i = 0; i < 6; i++)
+            this.faces.push(kNoMaterial);
+        this.meshes.push(mesh);
+        this.opaque.push(false);
+        this.solid.push(solid);
         return result;
     }
     addMaterialOfColor(name, color, liquid = false) {
@@ -172,6 +184,9 @@ class Registry {
     // faces has 6 elements for each block type: [+x, -x, +y, -y, +z, -z]
     getBlockFaceMaterial(id, face) {
         return this.faces[id * 6 + face];
+    }
+    getBlockMesh(id) {
+        return this.meshes[id];
     }
     getMaterialData(id) {
         assert(0 < id && id <= this.materials.length);
@@ -516,6 +531,7 @@ class Chunk {
         this.cx = cx;
         this.cz = cz;
         this.world = world;
+        this.instances = new Map();
         this.voxels = new Tensor3(kChunkWidth, kWorldHeight, kChunkWidth);
         this.heightmap = new Tensor2(kChunkWidth, kChunkWidth);
         this.light_map = new Tensor2(kChunkWidth, kChunkWidth);
@@ -585,6 +601,7 @@ class Chunk {
     }
     remeshChunk() {
         assert(this.dirty);
+        this.remeshSprites();
         this.remeshTerrain();
         this.dirty = false;
     }
@@ -634,6 +651,7 @@ class Chunk {
     }
     dropMeshes() {
         var _a, _b;
+        this.dropInstancedMeshes();
         if (this.hasMesh()) {
             this.world.frontier.markDirty(0);
         }
@@ -642,6 +660,12 @@ class Chunk {
         this.solid = null;
         this.water = null;
         this.dirty = true;
+    }
+    dropInstancedMeshes() {
+        const instances = this.instances;
+        for (const mesh of instances.values())
+            mesh.dispose();
+        instances.clear();
     }
     notifyNeighborDisposed() {
         assert(this.neighbors > 0);
@@ -655,6 +679,31 @@ class Chunk {
         assert(this.neighbors < 4);
         this.neighbors++;
         this.ready = this.checkReady();
+    }
+    remeshSprites() {
+        this.dropInstancedMeshes();
+        const { equilevels, instances, voxels, world } = this;
+        const { registry, renderer } = world;
+        const { data, stride } = voxels;
+        const bx = this.cx << kChunkBits;
+        const bz = this.cz << kChunkBits;
+        assert(stride[1] === 1);
+        for (let y = int(0); y < kWorldHeight; y++) {
+            const block = data[y];
+            if (equilevels[y] && !registry.getBlockMesh(block))
+                continue;
+            for (let x = int(0); x < kChunkWidth; x++) {
+                for (let z = int(0); z < kChunkWidth; z++) {
+                    const index = voxels.index(x, y, z);
+                    const mesh = registry.getBlockMesh(data[index]);
+                    if (!mesh)
+                        continue;
+                    const item = mesh.addInstance();
+                    item.setPosition(bx + x + 0.5, y, bz + z + 0.5);
+                    instances.set(index, item);
+                }
+            }
+        }
     }
     remeshTerrain() {
         const { cx, cz, world } = this;
@@ -720,16 +769,16 @@ class Chunk {
         else if (block !== kEmptyBlock && height <= end) {
             this.heightmap.data[offset] = end;
         }
-        const solid = this.world.registry.solid;
-        if (!solid[block] && start < light_ && light_ <= end) {
+        const opaque = this.world.registry.opaque;
+        if (!opaque[block] && start < light_ && light_ <= end) {
             let i = 0;
             for (; i < start; i++) {
-                if (solid[voxels.data[index - i - 1]])
+                if (opaque[voxels.data[index - i - 1]])
                     break;
             }
             this.light_map.data[offset] = start - i;
         }
-        else if (solid[block] && light_ <= end) {
+        else if (opaque[block] && light_ <= end) {
             this.light_map.data[offset] = end;
         }
     }
@@ -1248,7 +1297,11 @@ class Env {
     }
     getRenderBlock(x, y, z) {
         const result = this.world.getBlock(x, y, z);
-        return result === kUnknownBlock ? kEmptyBlock : result;
+        if (result === kEmptyBlock || result === kUnknownBlock ||
+            this.registry.getBlockFaceMaterial(result, 3) === kNoMaterial) {
+            return kEmptyBlock;
+        }
+        return result;
     }
     setSafeZoomDistance() {
         const camera = this.renderer.camera;
@@ -1351,7 +1404,9 @@ class Env {
         }
         if (new_block !== old_block) {
             const material = this.registry.getBlockFaceMaterial(new_block, 3);
-            const color = this.registry.getMaterialData(material).color;
+            const color = material !== kNoMaterial
+                ? this.registry.getMaterialData(material).color
+                : kWhite;
             this.cameraColor = color.slice();
             this.cameraAlpha = color[3];
         }
@@ -1372,5 +1427,5 @@ class Env {
 ;
 //////////////////////////////////////////////////////////////////////////////
 export { Column, Env };
-export { kChunkWidth, kEmptyBlock, kWorldHeight };
+export { kChunkWidth, kEmptyBlock, kNoMaterial, kWorldHeight };
 //# sourceMappingURL=engine.js.map
