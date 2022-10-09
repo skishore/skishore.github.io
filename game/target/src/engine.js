@@ -1306,26 +1306,53 @@ class Env {
     setSafeZoomDistance() {
         const camera = this.renderer.camera;
         const { direction, target, zoom } = camera;
+        const [x, y, z] = target;
         const check = (x, y, z) => {
             const block = this.world.getBlock(x, y, z);
             return !this.registry.solid[block];
         };
-        const [x, y, z] = target;
-        const buffer = kMinZUpperBound;
-        Vec3.set(kTmpMin, x - buffer, y - buffer, z - buffer);
-        Vec3.set(kTmpMax, x + buffer, y + buffer, z + buffer);
-        Vec3.scale(kTmpDelta, direction, -zoom);
-        sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
-        Vec3.add(kTmpDelta, kTmpMin, kTmpMax);
-        Vec3.scale(kTmpDelta, kTmpDelta, 0.5);
-        Vec3.sub(kTmpDelta, kTmpDelta, target);
-        camera.setSafeZoomDistance(Vec3.length(kTmpDelta));
+        const shift_target = (delta, bump) => {
+            const buffer = kMinZUpperBound;
+            Vec3.set(kTmpMin, x - buffer, y - buffer + bump, z - buffer);
+            Vec3.set(kTmpMax, x + buffer, y + buffer + bump, z + buffer);
+            sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
+            Vec3.add(kTmpDelta, kTmpMin, kTmpMax);
+            Vec3.scale(kTmpDelta, kTmpDelta, 0.5);
+            Vec3.sub(kTmpDelta, kTmpDelta, target);
+            return Vec3.length(kTmpDelta);
+        };
+        const safe_zoom_at = (bump) => {
+            Vec3.scale(kTmpDelta, direction, -zoom);
+            return shift_target(kTmpDelta, bump);
+        };
+        const max_bump = () => {
+            Vec3.set(kTmpDelta, 0, 0.5, 0);
+            return shift_target(kTmpDelta, 0);
+        };
+        let limit = 1;
+        let best_bump = -1;
+        let best_zoom = -1;
+        const step_size = 1 / 64;
+        for (let i = 0; i < limit; i++) {
+            const bump_at = i * step_size;
+            const zoom_at = safe_zoom_at(bump_at) - bump_at;
+            if (zoom_at < best_zoom)
+                continue;
+            best_bump = bump_at;
+            best_zoom = zoom_at;
+            if (zoom_at > zoom - bump_at - step_size)
+                break;
+            if (i === 0)
+                limit = Math.floor(max_bump() / step_size);
+        }
+        camera.setSafeZoomDistance(best_bump, best_zoom);
     }
     updateHighlightMesh() {
         const camera = this.renderer.camera;
         const { direction, target, zoom } = camera;
         let move = false;
         this.highlightMask[0] = (1 << 6) - 1;
+        this.highlightSide = -1;
         const check = (x, y, z) => {
             const block = this.world.getBlock(x, y, z);
             if (!this.registry.solid[block])
@@ -1370,7 +1397,7 @@ class Env {
             const pos = this.highlightPosition;
             this.highlight.setPosition(pos[0], pos[1], pos[2]);
         }
-        this.highlight.show(this.highlightMask, true);
+        this.highlight.show(this.highlightMask, this.highlightSide >= 0);
     }
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;

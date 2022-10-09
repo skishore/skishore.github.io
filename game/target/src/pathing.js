@@ -123,6 +123,7 @@ const AStarHeapExtractMin = (heap) => {
     AStarHeapCheckInvariants(heap);
     return result;
 };
+const AStarDiagonalPenalty = 1;
 const AStarUnitCost = 16;
 const AStarUpCost = 64;
 const AStarDownCost = 4;
@@ -144,16 +145,18 @@ const AStarHeuristic = (source, target) => {
         dz /= length;
     }
     return (p) => {
-        const ax = p.x - target.x;
-        const ay = p.y - target.y;
-        const az = p.z - target.z;
-        const dot = ax * dx + ay * dy + az * dz;
-        const ox = ax - dot * dx;
-        const oy = ay - dot * dy;
-        const oz = az - dot * dz;
+        const px = p.x - target.x;
+        const py = p.y - target.y;
+        const pz = p.z - target.z;
+        const dot = px * dx + py * dy + pz * dz;
+        const ox = px - dot * dx;
+        const oy = py - dot * dy;
+        const oz = pz - dot * dz;
         const off = Math.sqrt(ox * ox + oy * oy + oz * oz);
-        const base = AStarUnitCost * (Math.abs(ax) + Math.abs(az) + off);
-        return base + ay * (ay > 0 ? AStarDownCost : -AStarUpCost);
+        const ax = Math.abs(px), az = Math.abs(pz);
+        const base = Math.max(ax, az) * AStarUnitCost +
+            Math.min(ax, az) * AStarDiagonalPenalty;
+        return base + off + py * (py > 0 ? AStarDownCost : -AStarUpCost);
     };
 };
 const AStarHeight = (source, target, check) => {
@@ -175,10 +178,6 @@ const AStarDrop = (p, check) => {
 const AStarAdjust = (p, y) => {
     return y === p.y ? p : new Point(p.x, y, p.z);
 };
-const AStarAdjustEndpoint = (p, check) => {
-    const y = AStarDrop(p, check);
-    return y >= p.y - 1 ? AStarAdjust(p, y) : p;
-};
 const AStarNeighbors = (source, check, first) => {
     const result = [];
     const { up, down } = Direction;
@@ -187,18 +186,38 @@ const AStarNeighbors = (source, check, first) => {
         if (y !== source.y)
             result.push(new Point(source.x, y, source.z));
     }
-    for (const dir of Direction.cardinal) {
+    let blocked = 0;
+    const directions = Direction.all;
+    for (let i = 0; i < 8; i++) {
+        const diagonal = i & 4;
+        const index = ((i & 3) << 1) | (diagonal ? 1 : 0);
+        if (diagonal && (blocked & (1 << index)))
+            continue;
+        const dir = directions[index];
         const next = source.add(dir);
         const ny = AStarHeight(source, next, check);
+        if (!diagonal && (ny === null || ny > next.y)) {
+            blocked |= 1 << ((index - 1) & 7);
+            blocked |= 1 << ((index + 1) & 7);
+        }
         if (ny === null)
             continue;
         result.push(AStarAdjust(next, ny));
-        if (ny < next.y && check(source.add(up)) && check(next.add(up))) {
-            const jump = next.add(dir);
-            if (check(jump) && check(jump.add(up))) {
-                const jy = AStarDrop(jump, check);
-                if (jy > ny)
-                    result.push(AStarAdjust(jump, jy));
+        if (!diagonal && ny < next.y &&
+            check(source.add(up)) && check(next.add(up))) {
+            const flat_limit = 4;
+            const jump_limit = 3;
+            for (let j = 0, jump = next; j < flat_limit; j++) {
+                jump = jump.add(dir);
+                const jump_up = jump.add(up);
+                if (!check(jump_up))
+                    break;
+                if (!(j < jump_limit || check(jump)))
+                    break;
+                const jy = AStarDrop(jump_up, check);
+                result.push(AStarAdjust(jump, jy));
+                if (jy > source.y)
+                    break;
             }
         }
     }
@@ -208,8 +227,11 @@ const AStar = (source, target, check, limit, record) => {
     //console.log(`AStar: ${source.toString()} -> ${target.toString()}`);
     let count = int(0);
     limit = limit ? limit : AStarLimit;
-    source = AStarAdjustEndpoint(source, check);
-    target = AStarAdjustEndpoint(target, check);
+    const sy = AStarDrop(source, check);
+    source = sy >= source.y - 1 ? AStarAdjust(source, sy) : source;
+    const ty = AStarDrop(target, check);
+    const drop = target.y - ty;
+    target = AStarAdjust(target, ty);
     let best = null;
     const map = new Map();
     const heap = [];
@@ -230,9 +252,12 @@ const AStar = (source, target, check, limit, record) => {
         }
         for (const next of AStarNeighbors(cur, check, count === 1)) {
             const dy = next.y - cur.y;
-            const xz = Math.abs(next.x - cur.x) + Math.abs(next.z - cur.z);
-            const ud = dy * (dy > 0 ? AStarUpCost : -AStarDownCost);
-            const distance = cur.distance + xz * AStarUnitCost + ud;
+            const ax = Math.abs(next.x - cur.x);
+            const az = Math.abs(next.z - cur.z);
+            const distance = cur.distance +
+                Math.max(ax, az) * AStarUnitCost +
+                Math.min(ax, az) * AStarDiagonalPenalty +
+                dy * (dy > 0 ? AStarUpCost : -AStarDownCost);
             const key = AStarKey(next, source);
             const existing = map.get(key);
             // index !== null is a check to see if we've already popped this node
@@ -266,11 +291,18 @@ const AStar = (source, target, check, limit, record) => {
         result.push(best);
         best = best.parent;
     }
+    result.reverse();
+    if (drop > 1) {
+        for (let i = 0; i < result.length - 1; i++) {
+            if (result[i].y - result[i + 1].y > 1)
+                return [];
+        }
+    }
     //console.log(`Found ${result.length}-node path:`);
-    //for (let i = result.length - 1; i >= 0; i--) {
-    //  console.log(`  ${result[i].toString()}`);
+    //for (const step of result) {
+    //  console.log(`  ${step.toString()}`);
     //}
-    return result.reverse();
+    return result;
 };
 //////////////////////////////////////////////////////////////////////////////
 export { AStar, Direction, Point };

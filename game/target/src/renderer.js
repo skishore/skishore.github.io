@@ -5,8 +5,8 @@ const kTmpDelta = Vec3.create();
 const kTmpPlane = Vec3.create();
 class Camera {
     constructor(width, height) {
-        this.pitch = 0;
-        this.heading = 0;
+        this.heading = 0; // In radians: [0, 2π)
+        this.pitch = 0; // In radians: (-π/2, π/2)
         this.zoom = 0;
         this.safe_zoom = 0;
         this.direction = Vec3.from(0, 0, 1);
@@ -99,9 +99,10 @@ class Camera {
         Mat4.perspective(this.projection, 3 * Math.PI / 8, this.aspect, minZ);
         this.minZ = minZ;
     }
-    setSafeZoomDistance(zoom) {
+    setSafeZoomDistance(bump, zoom) {
         zoom = Math.max(Math.min(zoom, this.zoom), 0);
         Vec3.scaleAndAdd(this.position, this.target, this.direction, -zoom);
+        this.position[1] += bump;
         this.safe_zoom = zoom;
     }
     setTarget(x, y, z) {

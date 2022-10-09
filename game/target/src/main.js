@@ -116,17 +116,41 @@ const applyFriction = (axis, state, dv) => {
     state.vel[(axis + 1) % 3] *= scale;
     state.vel[(axis + 2) % 3] *= scale;
 };
-const tryAutoStepping = (dt, state, min, max, check) => {
+const tryAutoStepping = (env, dt, state, min, max, check) => {
     if (state.resting[1] > 0 && !state.inFluid)
         return;
-    const threshold = 4;
-    const speed_x = Math.abs(state.vel[0]);
-    const speed_z = Math.abs(state.vel[2]);
-    const step_x = (state.resting[0] !== 0 && threshold * speed_x > speed_z);
-    const step_z = (state.resting[2] !== 0 && threshold * speed_z > speed_x);
+    const { resting, vel } = state;
+    const { opaque, solid } = env.registry;
+    const threshold = 16;
+    const speed_x = Math.abs(vel[0]);
+    const speed_z = Math.abs(vel[2]);
+    const step_x = (() => {
+        if (resting[0] === 0)
+            return false;
+        if (threshold * speed_x <= speed_z)
+            return false;
+        const x = int(Math.floor(vel[0] > 0 ? max[0] + 0.5 : min[0] - 0.5));
+        const y = int(Math.floor(min[1]));
+        const z = int(Math.floor((min[2] + max[2]) / 2));
+        const block = env.world.getBlock(x, y, z);
+        return opaque[block] && solid[block];
+    })();
+    const step_z = (() => {
+        if (resting[2] === 0)
+            return false;
+        if (threshold * speed_z <= speed_x)
+            return false;
+        const x = int(Math.floor((min[0] + max[0]) / 2));
+        const y = int(Math.floor(min[1]));
+        const z = int(Math.floor(vel[2] > 0 ? max[2] + 0.5 : min[2] - 0.5));
+        const block = env.world.getBlock(x, y, z);
+        return opaque[block] && solid[block];
+    })();
     if (!step_x && !step_z)
         return;
     const height = 1 - min[1] + Math.floor(min[1]);
+    if (height > state.autoStepMax)
+        return;
     Vec3.set(kTmpDelta, 0, height, 0);
     sweep(min, max, kTmpDelta, kTmpResting, check);
     if (kTmpResting[1] !== 0)
@@ -187,7 +211,7 @@ const runPhysics = (env, dt, state) => {
     Vec3.set(state.forces, 0, 0, 0);
     Vec3.set(state.impulses, 0, 0, 0);
     if (state.autoStep) {
-        tryAutoStepping(dt, state, kTmpMin, kTmpMax, check);
+        tryAutoStepping(env, dt, state, kTmpMin, kTmpMax, check);
     }
     for (let i = 0; i < 3; i++) {
         if (state.resting[i] === 0)
@@ -209,7 +233,8 @@ const Physics = (env) => ({
         friction: 0,
         restitution: 0,
         mass: 1,
-        autoStep: 0,
+        autoStep: 0.0625,
+        autoStepMax: 0.5,
     }),
     onAdd: (state) => {
         setPhysicsFromPosition(env.position.getX(state.id), state);
@@ -399,8 +424,8 @@ const Movement = (env) => ({
         airMoveMultiplier: 0.5,
         airJumps: 0,
         jumpTime: 0.2,
-        jumpForce: 15,
-        jumpImpulse: 10,
+        jumpForce: 10,
+        jumpImpulse: 7.5,
         _jumped: false,
         _jumpCount: 0,
         _jumpTimeLeft: 0,
@@ -446,17 +471,21 @@ const runInputs = (env, id) => {
         }
     }
     // Call any followers.
-    if (inputs.call || Math.random() < 0.25) {
-        const body = env.physics.get(id);
-        if (body) {
-            const { min, max } = body;
-            const x = int(Math.floor((min[0] + max[0]) / 2));
-            const y = int(Math.floor(min[1]));
-            const z = int(Math.floor((min[2] + max[2]) / 2));
-            env.pathing.each(other => other.target = [x, y, z]);
-        }
-        inputs.call = false;
+    const body = env.physics.get(state.id);
+    if (body && (inputs.call || true)) {
+        const { min, max } = body;
+        const x = (min[0] + max[0]) / 2;
+        const y = (min[1] + body.autoStepMax);
+        const z = (min[2] + max[2]) / 2;
+        const ix = int(Math.floor(x));
+        const iy = int(Math.floor(y));
+        const iz = int(Math.floor(z));
+        env.pathing.each(other => {
+            other.target = [ix, iy, iz];
+            other.soft_target = [x, y, z];
+        });
     }
+    inputs.call = false;
     // Turn mouse inputs into actions.
     if (inputs.mouse0 || inputs.mouse1) {
         const body = env.physics.get(id);
@@ -527,13 +556,14 @@ const hasDirectPath = (env, start, end) => {
     return true;
 };
 const findPath = (env, state, body) => {
+    const grounded = body.resting[1] < 0;
+    if (!grounded)
+        return;
     const { min, max } = body;
     const sx = int(Math.floor((min[0] + max[0]) / 2));
     const sy = int(Math.floor(min[1]));
     const sz = int(Math.floor((min[2] + max[2]) / 2));
     const [tx, ty, tz] = nonnull(state.target);
-    if (body.resting[1] >= 0 && body.vel[1] > 0)
-        return;
     const path = AStar(new AStarPoint(sx, sy, sz), new AStarPoint(tx, ty, tz), p => !solid(env, p.x, p.y, p.z));
     if (path.length === 0)
         return;
@@ -549,9 +579,11 @@ const findPath = (env, state, body) => {
         result.push(full[full.length - 1]);
         result.shift();
     }
+    const last = result[result.length - 1];
+    const use_soft = last[0] === tx && last[2] === tz;
     state.path = result;
     state.path_index = 0;
-    state.target = null;
+    state.path_soft_target = use_soft ? state.soft_target : null;
     //console.log(JSON.stringify(state.path));
 };
 const PIDController = (error, derror, grounded) => {
@@ -583,11 +615,13 @@ const followPath = (env, state, body) => {
         state.path = null;
         return;
     }
+    const soft = state.path_soft_target;
+    const last = path_index === path.length - 1;
     const cur = path[path_index];
     const cx = (body.min[0] + body.max[0]) / 2;
     const cz = (body.min[2] + body.max[2]) / 2;
-    const dx = cur[0] + 0.5 - cx;
-    const dz = cur[2] + 0.5 - cz;
+    const dx = (last && soft ? soft[0] : cur[0] + 0.5) - cx;
+    const dz = (last && soft ? soft[2] : cur[2] + 0.5) - cz;
     const penalty = body.inFluid ? movement.swimPenalty : 1;
     const speed = penalty * movement.maxSpeed;
     const inverse_speed = speed ? 1 / speed : 1;
@@ -639,7 +673,9 @@ const Pathing = (env) => ({
         index: 0,
         path: null,
         path_index: 0,
+        path_soft_target: null,
         target: null,
+        soft_target: null,
     }),
     onUpdate: (dt, states) => {
         for (const state of states)
@@ -660,6 +696,13 @@ const Meshes = (env) => ({
     }),
     onRemove: (state) => { var _a; return (_a = state.mesh) === null || _a === void 0 ? void 0 : _a.dispose(); },
     onRender: (dt, states) => {
+        const camera = env.renderer.camera;
+        let cx = camera.position[0], cz = camera.position[2];
+        env.target.each(state => {
+            const { x, y, z, h, w } = env.position.getX(state.id);
+            cx = x - camera.zoom * Math.sin(camera.heading);
+            cz = z - camera.zoom * Math.cos(camera.heading);
+        });
         for (const state of states) {
             if (!state.mesh)
                 continue;
@@ -669,8 +712,7 @@ const Meshes = (env) => ({
             state.mesh.setLight(lit ? 1 : 0.64);
             state.mesh.setHeight(h);
             if (state.heading !== null) {
-                const pos = env.renderer.camera.position;
-                const camera_heading = Math.atan2(x - pos[0], z - pos[2]);
+                const camera_heading = Math.atan2(x - cx, z - cz);
                 const delta = state.heading - camera_heading;
                 state.row = Math.floor(8.5 - 2 * delta / Math.PI) & 3;
                 state.mesh.setFrame(int(state.column + state.row * state.columns));
@@ -765,7 +807,7 @@ const safeHeight = (position) => {
     }
     return height + 0.5 * (position.h + 1);
 };
-const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor) => {
+const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor, jumpForce, jumpImpulse) => {
     const entity = env.entities.addEntity();
     const position = env.position.add(entity);
     position.x = x + 0.5;
@@ -776,6 +818,8 @@ const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor) => {
     const movement = env.movement.add(entity);
     movement.maxSpeed = maxSpeed;
     movement.moveForce = maxSpeed * moveForceFactor;
+    movement.jumpForce = jumpForce;
+    movement.jumpImpulse = jumpImpulse;
     const mesh = env.meshes.add(entity);
     const sprite = { url: `images/${image}.png`, x: int(32), y: int(32) };
     mesh.mesh = env.renderer.addSpriteMesh(size, sprite);
@@ -786,11 +830,11 @@ const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor) => {
 };
 const main = () => {
     const env = new TypedEnv('container');
-    const size = 1.5;
-    const player = addEntity(env, 'player', size, 1, 1, 1.6, 0.8, 10, 4);
+    const size = 1;
+    const player = addEntity(env, 'player', size, 1, 1, 0.8, 0.6, 8, 4, 10, 7.5);
     env.inputs.add(player);
     env.target.add(player);
-    const follower = addEntity(env, 'follower', size, 1, 1, 0.8, 0.8, 15, 8);
+    const follower = addEntity(env, 'follower', size, 1, 1, 0.6, 0.6, 12, 8, 15, 10);
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {
