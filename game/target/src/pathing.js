@@ -1,4 +1,5 @@
-import { assert, int, nonnull } from './base.js';
+import { assert, int, nonnull, Vec3 } from './base.js';
+import { sweep } from './sweep.js';
 //////////////////////////////////////////////////////////////////////////////
 class Point {
     constructor(x, y, z) {
@@ -53,6 +54,39 @@ Direction.all = [Direction.n, Direction.ne, Direction.e, Direction.se,
 Direction.cardinal = [Direction.n, Direction.e, Direction.s, Direction.w];
 Direction.diagonal = [Direction.ne, Direction.se, Direction.sw, Direction.nw];
 ;
+//////////////////////////////////////////////////////////////////////////////
+const precomputeDiagonal = (x, z) => {
+    const result = [];
+    result.push(Point.origin);
+    const check = (x, y, z) => {
+        result.push(new Point(x, y, z));
+        return true;
+    };
+    const min = Vec3.from(0, 0, 0);
+    const max = Vec3.from(1, 1, 1);
+    const delta = Vec3.from(x, 0, z);
+    const impacts = Vec3.create();
+    sweep(min, max, delta, impacts, check);
+    result.forEach(p => {
+        assert(p.x >= 0);
+        assert(p.y === 0);
+        assert(p.z >= 0);
+    });
+    return result;
+};
+const kDiagonalDistance = 5;
+const kDiagonalArea = kDiagonalDistance * kDiagonalDistance;
+const kDiagonalScratch = new Array(kDiagonalArea).fill(true);
+const kDiagonalChecks = [];
+for (let x = int(1); x < kDiagonalDistance; x++) {
+    for (let z = int(1); z < kDiagonalDistance; z++) {
+        if (x === 1 && z === 1)
+            continue;
+        if (x * x + z * z > kDiagonalArea)
+            continue;
+        kDiagonalChecks.push(precomputeDiagonal(x, z));
+    }
+}
 //////////////////////////////////////////////////////////////////////////////
 class AStarNode extends Point {
     constructor(p, parent, distance, score) {
@@ -181,11 +215,12 @@ const AStarAdjust = (p, y) => {
 const AStarNeighbors = (source, check, first) => {
     const result = [];
     const { up, down } = Direction;
-    if (first) {
-        const y = AStarDrop(source, check);
-        if (y !== source.y)
-            result.push(new Point(source.x, y, source.z));
-    }
+    // The source may not be a grounded block. Every other node in the path
+    // will be grounded, due to the logic in this neighbor lookup function.
+    const y = first ? AStarDrop(source, check) : source.y;
+    const grounded = y === source.y;
+    if (!grounded)
+        result.push(new Point(source.x, y, source.z));
     let blocked = 0;
     const directions = Direction.all;
     for (let i = 0; i < 8; i++) {
@@ -203,21 +238,58 @@ const AStarNeighbors = (source, check, first) => {
         if (ny === null)
             continue;
         result.push(AStarAdjust(next, ny));
-        if (!diagonal && ny < next.y &&
+        if (ny < next.y && grounded &&
             check(source.add(up)) && check(next.add(up))) {
             const flat_limit = 4;
             const jump_limit = 3;
-            for (let j = 0, jump = next; j < flat_limit; j++) {
-                jump = jump.add(dir);
-                const jump_up = jump.add(up);
-                if (!check(jump_up))
-                    break;
-                if (!(j < jump_limit || check(jump)))
-                    break;
-                const jy = AStarDrop(jump_up, check);
-                result.push(AStarAdjust(jump, jy));
-                if (jy > source.y)
-                    break;
+            if (!diagonal) {
+                for (let j = 0, jump = next; j < flat_limit; j++) {
+                    jump = jump.add(dir);
+                    const jump_up = jump.add(up);
+                    if (!check(jump_up))
+                        break;
+                    if (!(j < jump_limit || check(jump)))
+                        break;
+                    const jy = AStarDrop(jump_up, check);
+                    result.push(AStarAdjust(jump, jy));
+                    if (jy > source.y)
+                        break;
+                }
+            }
+            else {
+                const d = kDiagonalDistance;
+                const scratch = kDiagonalScratch;
+                const check_two = (p) => check(p) && check(p.add(up));
+                for (let i = 1; i < kDiagonalDistance; i++) {
+                    const x = int(i * dir.x), z = int(i * dir.z);
+                    scratch[x * 1] = check_two(source.add(new Point(x, 0, 0)));
+                    scratch[z * d] = check_two(source.add(new Point(0, 0, z)));
+                }
+                for (const path of kDiagonalChecks) {
+                    let okay = true;
+                    const limit = path.length - 1;
+                    for (let j = 1; j < limit; j++) {
+                        const value = path[j];
+                        const index = value.x + value.z * d;
+                        if (scratch[index])
+                            continue;
+                        okay = false;
+                        break;
+                    }
+                    const value = path[limit];
+                    const index = value.x + value.z * d;
+                    if (!okay) {
+                        scratch[index] = false;
+                    }
+                    else {
+                        const dx = int(value.x * dir.x), dz = int(value.z * dir.z);
+                        const jump = source.add(new Point(dx, 0, dz));
+                        okay = check_two(jump);
+                        scratch[index] = okay;
+                        if (okay)
+                            result.push(AStarAdjust(jump, AStarDrop(jump, check)));
+                    }
+                }
             }
         }
     }

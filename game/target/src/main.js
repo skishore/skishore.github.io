@@ -584,6 +584,7 @@ const findPath = (env, state, body) => {
     state.path = result;
     state.path_index = 0;
     state.path_soft_target = use_soft ? state.soft_target : null;
+    state.target = state.soft_target = null;
     //console.log(JSON.stringify(state.path));
 };
 const PIDController = (error, derror, grounded) => {
