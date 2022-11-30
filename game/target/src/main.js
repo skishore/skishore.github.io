@@ -195,9 +195,10 @@ const runPhysics = (env, dt, state) => {
     Vec3.scale(kTmpDelta, kTmpAcceleration, dt);
     Vec3.scaleAndAdd(kTmpDelta, kTmpDelta, state.impulses, 1 / state.mass);
     if (state.friction) {
-        applyFriction(0, state, kTmpDelta);
-        applyFriction(1, state, kTmpDelta);
-        applyFriction(2, state, kTmpDelta);
+        Vec3.add(kTmpAcceleration, kTmpDelta, state.vel);
+        applyFriction(0, state, kTmpAcceleration);
+        applyFriction(1, state, kTmpAcceleration);
+        applyFriction(2, state, kTmpAcceleration);
     }
     if (state.autoStep) {
         Vec3.copy(kTmpMax, state.max);
@@ -507,54 +508,6 @@ const solid = (env, x, y, z) => {
     const block = env.world.getBlock(x, y, z);
     return env.registry.solid[block];
 };
-const hasDirectPath = (env, start, end) => {
-    if (start[1] !== end[1])
-        return false;
-    if (start[0] === end[0] && start[2] === end[2])
-        return true;
-    const [sx, y, sz] = start;
-    const [ex, _, ez] = end;
-    const dx = Math.abs(ex - sx);
-    const dz = Math.abs(ez - sz);
-    const elements = [];
-    if (dx <= dz) {
-        const extra = dx === 0 ? 1 : 0;
-        for (let i = 0; i < dz; i++) {
-            const a = Math.floor(i * dx / dz);
-            const b = Math.ceil((i + 1) * dx / dz) + extra;
-            for (let j = a; j < b; j++) {
-                const x = int(ex >= sx ? sx + j : sx - j - 1);
-                const z = int(ez >= sz ? sz + i : sz - i - 1);
-                elements.push([x, y, z]);
-            }
-        }
-    }
-    else {
-        const extra = dz === 0 ? 1 : 0;
-        for (let i = 0; i < dx; i++) {
-            const a = Math.floor(i * dz / dx);
-            const b = Math.ceil((i + 1) * dz / dx) + extra;
-            for (let j = a; j < b; j++) {
-                const x = int(ex >= sx ? sx + i : sx - i - 1);
-                const z = int(ez >= sz ? sz + j : sz - j - 1);
-                elements.push([x, y, z]);
-            }
-        }
-    }
-    const n = dx && dz ? 4 : 1;
-    for (const element of elements) {
-        const [x, y, z] = element;
-        for (let i = 0; i < n; i++) {
-            const ix = int(x + (i & 1));
-            const iz = int(z + ((i >> 1) & 1));
-            if (solid(env, ix, y, iz))
-                return false;
-            if (!solid(env, ix, int(y - 1), iz))
-                return false;
-        }
-    }
-    return true;
-};
 const findPath = (env, state, body) => {
     const grounded = body.resting[1] < 0;
     if (!grounded)
@@ -564,32 +517,94 @@ const findPath = (env, state, body) => {
     const sy = int(Math.floor(min[1]));
     const sz = int(Math.floor((min[2] + max[2]) / 2));
     const [tx, ty, tz] = nonnull(state.target);
-    const path = AStar(new AStarPoint(sx, sy, sz), new AStarPoint(tx, ty, tz), p => !solid(env, p.x, p.y, p.z));
+    const source = new AStarPoint(sx, sy, sz);
+    const target = new AStarPoint(tx, ty, tz);
+    const check = (p) => !solid(env, p.x, p.y, p.z);
+    const path = AStar(source, target, check);
     if (path.length === 0)
         return;
-    const full = path.map((p) => [p.x, p.y, p.z]);
-    const result = [full[0]];
-    for (let i = 2; i < full.length; i++) {
-        const last = result[result.length - 1];
-        if (hasDirectPath(env, last, full[i]))
-            continue;
-        result.push(full[i - 1]);
-    }
-    if (full.length > 1) {
-        result.push(full[full.length - 1]);
-        result.shift();
-    }
+    const result = path.map((p) => [p.x, p.y, p.z]);
     const last = result[result.length - 1];
     const use_soft = last[0] === tx && last[2] === tz;
     state.path = result;
     state.path_index = 0;
     state.path_soft_target = use_soft ? state.soft_target : null;
+    state.path_needs_precision = result.map(_ => false);
+    state.path_needs_precision[result.length - 1] = true;
     state.target = state.soft_target = null;
     //console.log(JSON.stringify(state.path));
 };
 const PIDController = (error, derror, grounded) => {
     const dfactor = grounded ? 1.00 : 2.00;
     return 20.00 * error + dfactor * derror;
+};
+const nextPathStep = (env, state, body, grounded) => {
+    if (!grounded)
+        return false;
+    const { min, max } = body;
+    const path = nonnull(state.path);
+    const path_index = state.path_index;
+    const path_needs_precision = nonnull(state.path_needs_precision);
+    const soft = state.path_soft_target;
+    const node = path[path_index];
+    const last = path_index === path.length - 1;
+    const use_soft = grounded && last && soft;
+    const needs_precision = path_needs_precision[path_index];
+    const x = use_soft ? soft[0] - 0.5 : node[0];
+    const z = use_soft ? soft[2] - 0.5 : node[2];
+    const y = node[1];
+    const E = (() => {
+        const width = max[0] - min[0];
+        if (needs_precision)
+            return 0.4 * (1 - width);
+        return (path_index === 0 ? -0.6 : -0.4) * width;
+    })();
+    const result = x + E <= min[0] && max[0] <= x + 1 - E &&
+        y + 0 <= min[1] && max[1] <= y + 1 - 0 &&
+        z + E <= min[2] && max[2] <= z + 1 - E;
+    if (result && !needs_precision && path_index < path.length - 1) {
+        const blocked = (() => {
+            const check = (x, y, z) => {
+                const block = env.world.getBlock(x, y, z);
+                return !env.registry.solid[block];
+            };
+            const check_move = (x, y, z) => {
+                Vec3.set(kTmpDelta, x, y, z);
+                sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpResting, check, true);
+                return kTmpResting[0] || kTmpResting[1] || kTmpResting[2];
+            };
+            Vec3.copy(kTmpMax, body.max);
+            Vec3.copy(kTmpMin, body.min);
+            const prev = path[path_index];
+            const next = path[path_index + 1];
+            const dx = next[0] + 0.5 - 0.5 * (body.min[0] + body.max[0]);
+            const dz = next[2] + 0.5 - 0.5 * (body.min[2] + body.max[2]);
+            const dy = next[1] - body.min[1];
+            // TODO(shaunak): When applied to path_index 0, this check can result in
+            // a kind of infinite loop that prevents path following. It occurs if
+            // the A-star algorithm returns a path where the first step (from the
+            // sprite's original cell to the next cell) includes a collision. A-star
+            // isn't supposed to do that, but that's a fragile invariant to rely on.
+            //
+            // When the invariant is broken, then path_needs_precision will be set
+            // for path_index 0. We'll move to the center of that cell, then move
+            // to the next path step. But as soon as we move away from the center,
+            // the next call to A-star will still have the same origin, and will
+            // re-start the loop.
+            //
+            // How can we fix this issue safely? We could double-check here that if
+            // the current path is blocked, then the path from the center of the cell
+            // is not blocked (i.e. double-check the supposed invariant). If it fails,
+            // then pathing to the block center is useless and we'll skip it.
+            return (dy <= 0 || check_move(0, dy, 0)) &&
+                (!(dx || dz) || check_move(dx, 0, dz));
+        })();
+        if (blocked) {
+            path_needs_precision[path_index] = true;
+            return false;
+        }
+    }
+    return result;
 };
 const followPath = (env, state, body) => {
     const path = nonnull(state.path);
@@ -601,28 +616,21 @@ const followPath = (env, state, body) => {
     if (!movement)
         return;
     const grounded = body.resting[1] < 0;
-    const node = path[state.path_index];
-    const E = state.path_index + 1 === path.length
-        ? 0.4 * (1 - (body.max[0] - body.min[0]))
-        : -0.4 * (body.max[0] - body.min[0]);
-    if (node[0] + E <= body.min[0] && body.max[0] <= node[0] + 1 - E &&
-        node[1] + 0 <= body.min[1] && body.min[1] <= node[1] + 1 - 0 &&
-        node[2] + E <= body.min[2] && body.max[2] <= node[2] + 1 - E &&
-        grounded) {
+    if (nextPathStep(env, state, body, grounded))
         state.path_index++;
-    }
-    const path_index = state.path_index;
-    if (path_index === path.length) {
+    if (state.path_index === path.length) {
         state.path = null;
         return;
     }
+    const path_index = state.path_index;
     const soft = state.path_soft_target;
     const last = path_index === path.length - 1;
+    const use_soft = grounded && last && soft;
     const cur = path[path_index];
     const cx = (body.min[0] + body.max[0]) / 2;
     const cz = (body.min[2] + body.max[2]) / 2;
-    const dx = (last && soft ? soft[0] : cur[0] + 0.5) - cx;
-    const dz = (last && soft ? soft[2] : cur[2] + 0.5) - cz;
+    const dx = (use_soft ? soft[0] : cur[0] + 0.5) - cx;
+    const dz = (use_soft ? soft[2] : cur[2] + 0.5) - cz;
     const penalty = body.inFluid ? movement.swimPenalty : 1;
     const speed = penalty * movement.maxSpeed;
     const inverse_speed = speed ? 1 / speed : 1;
@@ -653,8 +661,9 @@ const followPath = (env, state, body) => {
     const mesh = env.meshes.get(state.id);
     if (!mesh)
         return;
-    const vx = path_index > 0 ? cur[0] - path[path_index - 1][0] : dx;
-    const vz = path_index > 0 ? cur[2] - path[path_index - 1][2] : dz;
+    const use_dx = use_soft || path_index === 0;
+    const vx = use_dx ? dx : cur[0] - path[path_index - 1][0];
+    const vz = use_dx ? dz : cur[2] - path[path_index - 1][2];
     mesh.heading = Math.atan2(vx, vz);
 };
 const runPathing = (env, state) => {
@@ -675,6 +684,7 @@ const Pathing = (env) => ({
         path: null,
         path_index: 0,
         path_soft_target: null,
+        path_needs_precision: null,
         target: null,
         soft_target: null,
     }),
@@ -831,11 +841,11 @@ const addEntity = (env, image, size, x, z, h, w, maxSpeed, moveForceFactor, jump
 };
 const main = () => {
     const env = new TypedEnv('container');
-    const size = 1;
-    const player = addEntity(env, 'player', size, 1, 1, 0.8, 0.6, 8, 4, 10, 7.5);
+    const size = 1.5;
+    const player = addEntity(env, 'player', size, 1, 1, 1.5, 0.75, 8, 4, 10, 7.5);
     env.inputs.add(player);
     env.target.add(player);
-    const follower = addEntity(env, 'follower', size, 1, 1, 0.6, 0.6, 12, 8, 15, 10);
+    const follower = addEntity(env, 'follower', size, 1, 1, 0.75, 0.75, 12, 8, 15, 10);
     env.meshes.getX(follower).heading = 0;
     env.pathing.add(follower);
     const texture = (x, y, alphaTest = false, sparkle = false) => {

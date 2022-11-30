@@ -498,7 +498,10 @@ class Circle {
 const kChunkBits = int(4);
 const kChunkWidth = int(1 << kChunkBits);
 const kChunkMask = int(kChunkWidth - 1);
-const kWorldHeight = int(256);
+const kHeightBits = int(8);
+const kWorldHeight = int(1 << kHeightBits);
+const kChunkShiftX = kHeightBits;
+const kChunkShiftZ = kHeightBits + kChunkBits;
 const kChunkRadius = 12;
 const kNumChunksToLoadPerFrame = 1;
 const kNumChunksToMeshPerFrame = 1;
@@ -537,6 +540,11 @@ class Chunk {
         this.light_map = new Tensor2(kChunkWidth, kChunkWidth);
         this.equilevels = new Int8Array(kWorldHeight);
         this.load(loader);
+        // Check the invariants we use to optimize getBlock.
+        const [sx, sy, sz] = this.voxels.stride;
+        assert(sx === (1 << kChunkShiftX));
+        assert(sz === (1 << kChunkShiftZ));
+        assert(sy === 1);
     }
     dispose() {
         this.dropMeshes();
@@ -553,7 +561,8 @@ class Chunk {
     }
     getBlock(x, y, z) {
         const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
-        return this.voxels.get(xm, y, zm);
+        const index = (xm << kChunkShiftX) | y | (zm << kChunkShiftZ);
+        return this.voxels.data[index];
     }
     getLitHeight(x, z) {
         const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
@@ -1309,7 +1318,7 @@ class Env {
         const [x, y, z] = target;
         const check = (x, y, z) => {
             const block = this.world.getBlock(x, y, z);
-            return !this.registry.solid[block];
+            return !this.registry.opaque[block];
         };
         const shift_target = (delta, bump) => {
             const buffer = kMinZUpperBound;
