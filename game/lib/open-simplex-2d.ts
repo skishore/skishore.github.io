@@ -70,7 +70,12 @@ export function makeNoise2D(clientSeed: number): Noise2D {
         const indexPart = perm[px & 0xff];
         const index = perm[(indexPart + py) & 0xff] & 0x0e;
 
-        const valuePart = gradients2D[index] * dx + gradients2D[index + 1] * dy;
+        const absGradientX = (index & 2) ? 2 : 5;
+        const absGradientY = 7 - absGradientX;
+        const gradientX = (index & 4) ? -absGradientX : absGradientX;
+        const gradientY = (index & 8) ? -absGradientY : absGradientY;
+
+        const valuePart = gradientX * dx + gradientY * dy;
         value += attn * attn * attn * attn * valuePart;
       }
     }
@@ -141,15 +146,3 @@ const [kContributions, kLookup] = (() => {
   }
   return [contributions, lookup];
 })();
-
-// Stored packed: accessed at query time
-const gradients2D = new Int32Array([
-  5, 2,
-  2, 5,
-  -5, 2,
-  -2, 5,
-  5, -2,
-  2, -5,
-  -5, -2,
-  -2, -5,
-]);

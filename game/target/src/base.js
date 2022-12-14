@@ -294,7 +294,7 @@ class Tensor2 {
 ;
 class Tensor3 {
     constructor(x, y, z) {
-        this.data = new Int16Array(x * y * z);
+        this.data = new Uint8Array(x * y * z);
         this.shape = [x, y, z];
         this.stride = [y, 1, int(x * y)];
     }

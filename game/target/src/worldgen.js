@@ -20,11 +20,12 @@ const noise2D = () => {
 };
 const minetest_noise_2d = (offset, scale, spread, octaves, persistence, lacunarity) => {
     const components = new Array(octaves).fill(null).map(noise2D);
+    const inverse_spread = 1 / spread;
     return (x, y) => {
         let f = 1, g = 1;
         let result = 0;
-        x /= spread;
-        y /= spread;
+        x *= inverse_spread;
+        y *= inverse_spread;
         for (let i = 0; i < octaves; i++) {
             result += g * components[i](x * f, y * f);
             f *= lacunarity;

@@ -113,6 +113,7 @@ class Camera {
 //////////////////////////////////////////////////////////////////////////////
 const ARRAY_BUFFER = WebGL2RenderingContext.ARRAY_BUFFER;
 const TEXTURE_2D_ARRAY = WebGL2RenderingContext.TEXTURE_2D_ARRAY;
+const TEXTURE_3D = WebGL2RenderingContext.TEXTURE_3D;
 ;
 ;
 class Shader {
@@ -163,6 +164,7 @@ class Shader {
         gl.shaderSource(result, `#version 300 es
                              precision highp float;
                              precision highp sampler2DArray;
+                             precision highp sampler3D;
                              ${source}`);
         gl.compileShader(result);
         if (!gl.getShaderParameter(result, gl.COMPILE_STATUS)) {
@@ -205,7 +207,7 @@ class TextureAtlas {
         gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_LINEAR);
     }
     addTexture(texture) {
-        const index = int(++this.nextResult);
+        const index = int(this.nextResult++);
         const image = this.image(texture.url);
         if (image.complete) {
             this.loaded(texture, index, image);
@@ -216,7 +218,9 @@ class TextureAtlas {
         return index;
     }
     bind() {
-        this.gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
+        const { gl, texture } = this;
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(TEXTURE_2D_ARRAY, this.texture);
     }
     sparkle() {
         if (!this.canvas)
@@ -295,14 +299,16 @@ class TextureAtlas {
         const offset = length * index;
         const pixels = canvas.getImageData(0, 0, size, size).data;
         assert(pixels.length === length);
+        const color = texture.color;
+        for (let i = 0; i < length; i++) {
+            pixels[i] = (pixels[i] * color[i & 3]) & 0xff;
+        }
         const capacity = this.data ? this.data.length : 0;
         const required = length + offset;
         const allocate = capacity < required;
         if (allocate) {
             const data = new Uint8Array(Math.max(2 * capacity, required));
-            for (let i = 0; i < length; i++)
-                data[i] = 255;
-            for (let i = length; i < this.data.length; i++)
+            for (let i = 0; i < this.data.length; i++)
                 data[i] = this.data[i];
             this.data = data;
         }
@@ -399,6 +405,7 @@ class SpriteAtlas {
         const pixels = canvas.getImageData(0, 0, x, y * frames).data;
         assert(pixels.length === length);
         const gl = this.gl;
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(TEXTURE_2D_ARRAY, texture);
         gl.texImage3D(TEXTURE_2D_ARRAY, 0, gl.RGBA, x, y, frames, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
         gl.generateMipmap(TEXTURE_2D_ARRAY);
@@ -427,10 +434,10 @@ class Geometry {
     allocateQuads(n) {
         this.num_quads = n;
         const length = this.quads.length;
-        const needed = Geometry.Stride * n;
+        const needed = Geometry.StrideInInt32 * n;
         if (length >= needed)
             return;
-        const expanded = new Float32Array(Math.max(length * 2, needed));
+        const expanded = new Int32Array(Math.max(length * 2, needed));
         expanded.set(this.quads);
         this.quads = expanded;
     }
@@ -446,18 +453,19 @@ class Geometry {
         Vec3.set(lower_bound, Infinity, Infinity, Infinity);
         Vec3.set(upper_bound, -Infinity, -Infinity, -Infinity);
         const quads = this.quads;
-        const stride = Geometry.Stride;
-        assert(Geometry.OffsetPos === 0);
-        assert(Geometry.OffsetSize === 3);
-        assert(Geometry.OffsetDim === 10);
+        const stride = Geometry.StrideInInt32;
         assert(quads.length % stride === 0);
         for (let i = 0; i < quads.length; i += stride) {
-            const lx = quads[i + 0];
-            const ly = quads[i + 1];
-            const lz = quads[i + 2];
-            const w = quads[i + 3];
-            const h = quads[i + 4];
-            const dim = quads[i + 10];
+            const xy = quads[i + 0];
+            const zi = quads[i + 1];
+            const lx = (xy << 16) >> 16;
+            const ly = xy >> 16;
+            const lz = (zi << 16) >> 16;
+            const wh = quads[i + 2];
+            const w = (wh << 16) >> 16;
+            const h = wh >> 16;
+            const extra = quads[i + 3];
+            const dim = (extra >> 28) & 0x3;
             const mx = lx + (dim === 2 ? w : dim === 1 ? h : 0);
             const my = ly + (dim === 0 ? w : dim === 2 ? h : 0);
             const mz = lz + (dim === 1 ? w : dim === 0 ? h : 0);
@@ -485,35 +493,37 @@ class Geometry {
     }
     static clone(geo) {
         const num_quads = geo.num_quads;
-        const quads = geo.quads.slice(0, num_quads * Geometry.Stride);
+        const quads = geo.quads.slice(0, num_quads * Geometry.StrideInInt32);
         return new Geometry(quads, num_quads);
     }
     static empty() {
-        return new Geometry(new Float32Array(), 0);
+        return new Geometry(new Int32Array(), 0);
     }
 }
-// position: vec3
-Geometry.OffsetPos = 0;
-// size: vec2
-Geometry.OffsetSize = 3;
-// color: vec4
-Geometry.OffsetColor = 5;
-// ao: float -> int32; 4 packed 2-bit values
-Geometry.OffsetAOs = 9;
-// dim: float -> int32; {0, 1, 2}
-Geometry.OffsetDim = 10;
-// dir: float -> int32; {-1, 1}
-Geometry.OffsetDir = 11;
-// mask: float -> int32; small int
-Geometry.OffsetMask = 12;
-// wave: float -> int32; 4 packed 1-bit values
-Geometry.OffsetWave = 13;
-// texture: float -> int32; medium int
-Geometry.OffsetTexture = 14;
-// indices: float -> int32; 6 packed 2-bit values
-Geometry.OffsetIndices = 15;
-// Overall stride (in floats)
-Geometry.Stride = 16;
+// struct Quad {
+//   // int 0
+//   int16_t x;
+//   int16_t y;
+//
+//   // int 1
+//   int16_t z;
+//   int16_t indices; // 6 x 2-bit ints
+//
+//   // int 2
+//   int16_t w;
+//   int16_t h;
+//
+//   // int 3
+//   uint8_t mask:    8; // only need 6 bits
+//   uint8_t texture: 8; // could use more bits
+//   uint8_t ao:      8; // 4 x 2-bit AO values
+//   uint8_t wave:    4; // 4 x 1-bit wave flags
+//   uint8_t dim:     2;
+//   uint8_t dir:     1;
+//   uint8_t lit:     1;
+// };
+Geometry.StrideInInt32 = 4;
+Geometry.StrideInBytes = 16;
 ;
 //////////////////////////////////////////////////////////////////////////////
 class Buffer {
@@ -581,6 +591,41 @@ class BufferAllocator {
     }
 }
 ;
+class TextureAllocator {
+    constructor(gl) {
+        this.gl = gl;
+        this.freeList = [];
+    }
+    alloc(data) {
+        assert(data.length === 256 * 16 * 16);
+        const gl = this.gl;
+        const id = gl.TEXTURE_3D;
+        const format = gl.LUMINANCE;
+        const type = gl.UNSIGNED_BYTE;
+        gl.activeTexture(gl.TEXTURE1);
+        if (this.freeList.length > 0) {
+            const texture = this.freeList.pop();
+            gl.bindTexture(id, texture);
+            gl.texSubImage3D(id, 0, 0, 0, 0, 256, 16, 16, format, type, data, 0);
+            return texture;
+        }
+        else {
+            const texture = nonnull(gl.createTexture());
+            gl.bindTexture(id, texture);
+            gl.texImage3D(id, 0, format, 256, 16, 16, 0, format, type, data);
+            gl.texParameteri(id, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(id, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(id, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(id, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(id, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            return texture;
+        }
+    }
+    free(texture) {
+        this.freeList.push(texture);
+    }
+}
+;
 ;
 class Mesh {
     constructor(manager, meshes) {
@@ -639,28 +684,28 @@ class Mesh {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
+const kShadowAlpha = 0.36;
 const kVoxelShader = `
   uniform ivec2 u_mask;
   uniform float u_move;
   uniform float u_wave;
   uniform mat4 u_transform;
 
-  in vec3 a_pos;
-  in vec2 a_size;
-  in vec4 a_color;
-  in float a_aos;
-  in float a_dim;
-  in float a_dir;
-  in float a_mask;
-  in float a_wave;
-  in float a_texture;
-  in float a_indices;
+  in ivec3 a_pos;
+  in ivec2 a_size;
+  in uint  a_indices;
+  in uint  a_ao;
+  in uint  a_mask;
+  in uint  a_texture;
+  // 4-bit wave; 2-bit dim; 1-bit dir; 1-bit lit
+  in int   a_wddl;
 
-  out vec4 v_color;
+  out vec3 v_pos;
   out vec3 v_uvw;
   out float v_move;
+  out float v_light;
 
-  int unpackI2(float packed, int index) {
+  int unpackI2(uint packed, int index) {
     return (int(packed) >> (2 * index)) & 3;
   }
 
@@ -668,31 +713,36 @@ const kVoxelShader = `
     int instance = gl_VertexID + 3 * (gl_InstanceID & 1);
     int index = unpackI2(a_indices, instance);
 
-    float ao = 1.0 - 0.3 * float(unpackI2(a_aos, index));
-    v_color = vec4(ao * vec3(a_color), a_color[3]);
+    float shadow = a_wddl < 0 ? 0.0 : 0.0;
+    float ao = 1.0 - 0.3 * float(unpackI2(a_ao, index));
+    v_light = ao * (1.0 - ${kShadowAlpha} * shadow);
 
-    int dim = int(a_dim);
+    int dim = (a_wddl >> 4) & 0x3;
+    float dir = ((a_wddl & 64) != 0) ? 1.0 : -1.0;
     float w = float(((index + 1) & 3) >> 1);
     float h = float(((index + 0) & 3) >> 1);
 
-    v_uvw = vec3(0.0, 0.0, a_texture);
+    v_uvw = vec3(0.0, 0.0, float(a_texture));
     const float kTextureBuffer = 0.01;
     if (dim == 2) {
-      v_uvw[0] = (a_size[0] - kTextureBuffer) * w * -a_dir;
-      v_uvw[1] = (a_size[1] - kTextureBuffer) * (1.0 - h);
+      v_uvw[0] = (float(a_size[0]) - kTextureBuffer) * w * -dir;
+      v_uvw[1] = (float(a_size[1]) - kTextureBuffer) * (1.0 - h);
     } else {
-      v_uvw[0] = (a_size[1] - kTextureBuffer) * h * a_dir;
-      v_uvw[1] = (a_size[0] - kTextureBuffer) * (1.0 - w);
+      v_uvw[0] = (float(a_size[1]) - kTextureBuffer) * h * dir;
+      v_uvw[1] = (float(a_size[0]) - kTextureBuffer) * (1.0 - w);
     }
 
-    float wave = float((int(a_wave) >> index) & 0x1);
+    float wave = float((a_wddl >> index) & 0x1);
     v_move = wave * u_move;
 
-    vec3 pos = a_pos;
-    pos[(dim + 1) % 3] += w * a_size[0];
-    pos[(dim + 2) % 3] += h * a_size[1];
+    vec3 pos = vec3(float(a_pos[0]), float(a_pos[1]), float(a_pos[2]));
+    pos[(dim + 1) % 3] += w * float(a_size[0]);
+    pos[(dim + 2) % 3] += h * float(a_size[1]);
     pos[1] -= wave * u_wave;
     gl_Position = u_transform * vec4(pos, 1.0);
+
+    v_pos = pos;
+    v_pos[dim] += 0.5 * dir;
 
     int mask = int(a_mask);
     int mask_index = mask >> 5;
@@ -704,17 +754,25 @@ const kVoxelShader = `
   uniform float u_alphaTest;
   uniform vec3 u_fogColor;
   uniform float u_fogDepth;
+  uniform int u_hasLight;
   uniform sampler2DArray u_texture;
-  in vec4 v_color;
+  uniform sampler3D u_light;
+  in vec3 v_pos;
   in vec3 v_uvw;
   in float v_move;
+  in float v_light;
   out vec4 o_color;
 
   void main() {
+    bool hasLight = u_hasLight == 1;
+    ivec3 texel = ivec3(int(v_pos[1]), int(v_pos[0]), int(v_pos[2]));
+    float level = hasLight ? 256.0 * texelFetch(u_light, texel, 0)[0] : 15.0;
+    float light = pow(0.8, 15.0 - level);
+
     float depth = u_fogDepth * gl_FragCoord.w;
     float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
     vec3 index = v_uvw + vec3(v_move, v_move, 0.0);
-    vec4 color = v_color * texture(u_texture, index);
+    vec4 color = vec4(vec3(light * v_light), 1.0) * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
     if (o_color[3] < 0.5 * u_alphaTest) discard;
   }
@@ -729,16 +787,15 @@ class VoxelShader extends Shader {
         this.u_alphaTest = this.getUniformLocation('u_alphaTest');
         this.u_fogColor = this.getUniformLocation('u_fogColor');
         this.u_fogDepth = this.getUniformLocation('u_fogDepth');
+        this.u_hasLight = this.getUniformLocation('u_hasLight');
+        this.u_light = this.getUniformLocation('u_light');
         this.a_pos = this.getAttribLocation('a_pos');
         this.a_size = this.getAttribLocation('a_size');
-        this.a_color = this.getAttribLocation('a_color');
-        this.a_aos = this.getAttribLocation('a_aos');
-        this.a_dim = this.getAttribLocation('a_dim');
-        this.a_dir = this.getAttribLocation('a_dir');
-        this.a_mask = this.getAttribLocation('a_mask');
-        this.a_wave = this.getAttribLocation('a_wave');
-        this.a_texture = this.getAttribLocation('a_texture');
+        this.a_ao = this.getAttribLocation('a_ao');
         this.a_indices = this.getAttribLocation('a_indices');
+        this.a_mask = this.getAttribLocation('a_mask');
+        this.a_texture = this.getAttribLocation('a_texture');
+        this.a_wddl = this.getAttribLocation('a_wddl');
     }
 }
 ;
@@ -749,7 +806,8 @@ class VoxelMesh extends Mesh {
         this.vao = null;
         this.quads = null;
         this.mask = kDefaultMask;
-        this.allocator = manager.allocator;
+        this.light = null;
+        this.manager = manager;
         this.geo = geo;
     }
     dispose() {
@@ -766,6 +824,13 @@ class VoxelMesh extends Mesh {
         const gl = this.gl;
         const n = this.geo.num_quads;
         gl.bindVertexArray(this.vao);
+        if (this.light) {
+            gl.uniform1i(this.manager.shader.u_hasLight, 1);
+            gl.bindTexture(TEXTURE_3D, this.light);
+        }
+        else {
+            gl.uniform1i(this.manager.shader.u_hasLight, 0);
+        }
         gl.uniform2iv(this.shader.u_mask, this.mask);
         gl.uniformMatrix4fv(this.shader.u_transform, false, transform);
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 3, n * 2);
@@ -778,6 +843,11 @@ class VoxelMesh extends Mesh {
         this.destroyBuffers();
         this.geo = geo;
     }
+    setLight(light) {
+        if (this.light)
+            this.manager.talloc.free(this.light);
+        this.light = this.manager.talloc.alloc(light);
+    }
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
     }
@@ -789,13 +859,15 @@ class VoxelMesh extends Mesh {
         assert(shown === this.shown());
     }
     destroyBuffers() {
-        const { gl, quads } = this;
-        const n = this.geo.num_quads * Geometry.Stride;
+        const { gl, light, quads } = this;
         gl.deleteVertexArray(this.vao);
         if (quads)
-            this.allocator.free(quads);
+            this.manager.balloc.free(quads);
+        if (light)
+            this.manager.talloc.free(light);
         this.vao = null;
         this.quads = null;
+        this.light = null;
     }
     prepareBuffers() {
         if (this.vao)
@@ -804,38 +876,36 @@ class VoxelMesh extends Mesh {
         this.vao = nonnull(gl.createVertexArray());
         gl.bindVertexArray(this.vao);
         this.prepareQuads(this.geo.quads);
-        this.prepareAttribute(shader.a_pos, 3, Geometry.OffsetPos);
-        this.prepareAttribute(shader.a_size, 2, Geometry.OffsetSize);
-        this.prepareAttribute(shader.a_color, 4, Geometry.OffsetColor);
-        this.prepareAttribute(shader.a_aos, 1, Geometry.OffsetAOs);
-        this.prepareAttribute(shader.a_dim, 1, Geometry.OffsetDim);
-        this.prepareAttribute(shader.a_dir, 1, Geometry.OffsetDir);
-        this.prepareAttribute(shader.a_mask, 1, Geometry.OffsetMask);
-        this.prepareAttribute(shader.a_wave, 1, Geometry.OffsetWave);
-        this.prepareAttribute(shader.a_texture, 1, Geometry.OffsetTexture);
-        this.prepareAttribute(shader.a_indices, 1, Geometry.OffsetIndices);
+        const { BYTE, SHORT, UNSIGNED_BYTE: UBYTE, UNSIGNED_SHORT: USHORT } = gl;
+        this.prepareAttribute(shader.a_pos, SHORT, 3, 0);
+        this.prepareAttribute(shader.a_indices, USHORT, 1, 6);
+        this.prepareAttribute(shader.a_size, SHORT, 2, 8);
+        this.prepareAttribute(shader.a_mask, UBYTE, 1, 12);
+        this.prepareAttribute(shader.a_texture, UBYTE, 1, 13);
+        this.prepareAttribute(shader.a_ao, UBYTE, 1, 14);
+        this.prepareAttribute(shader.a_wddl, BYTE, 1, 15);
     }
-    prepareAttribute(location, size, offset_in_floats) {
+    prepareAttribute(location, type, size, offset) {
         if (location === null)
             return;
         const gl = this.gl;
-        const offset = 4 * offset_in_floats;
-        const stride = 4 * Geometry.Stride;
+        const stride = Geometry.StrideInBytes;
         gl.enableVertexAttribArray(location);
-        gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset);
+        gl.vertexAttribIPointer(location, size, type, stride, offset);
         gl.vertexAttribDivisor(location, 2);
     }
     prepareQuads(data) {
-        const n = this.geo.num_quads * Geometry.Stride;
+        const n = this.geo.num_quads * Geometry.StrideInInt32;
         const subarray = data.length > n ? data.subarray(0, n) : data;
-        this.quads = this.allocator.alloc(subarray, false);
+        this.quads = this.manager.balloc.alloc(subarray, false);
     }
 }
 ;
 class VoxelManager {
     constructor(gl, allocator) {
         this.gl = gl;
-        this.allocator = allocator;
+        this.balloc = allocator;
+        this.talloc = new TextureAllocator(gl);
         this.shader = new VoxelShader(gl);
         this.atlas = new TextureAtlas(gl);
         this.phases = [[], [], []];
@@ -852,16 +922,17 @@ class VoxelManager {
         shader.bind();
         const meshes = this.phases[phase];
         const fog_color = overlay.getFogColor();
-        const fog_depth = overlay.getFogDepth();
+        const fog_depth = overlay.getFogDepth(camera);
         gl.uniform1f(shader.u_move, move);
         gl.uniform1f(shader.u_wave, wave);
         gl.uniform1f(shader.u_alphaTest, 1);
         gl.uniform3fv(shader.u_fogColor, fog_color);
         gl.uniform1f(shader.u_fogDepth, fog_depth);
+        gl.uniform1i(shader.u_light, 1);
+        gl.activeTexture(gl.TEXTURE1);
         // Rendering phases:
         //   0) Opaque and alpha-tested voxel meshes.
-        //   1) The highlight mesh, drawn before shadows and other effects.
-        //   2) All other alpha-blended voxel meshes. (Should we sort them?)
+        //   1) All other alpha-blended voxel meshes. (Should we sort them?)
         if (phase === 0) {
             for (const mesh of meshes) {
                 if (mesh.draw(camera, planes))
@@ -871,15 +942,11 @@ class VoxelManager {
         else {
             gl.enable(gl.BLEND);
             gl.disable(gl.CULL_FACE);
-            if (phase === 1)
-                gl.depthMask(false);
             gl.uniform1f(shader.u_alphaTest, 0);
             for (const mesh of meshes) {
                 if (mesh.draw(camera, planes))
                     drawn++;
             }
-            if (phase === 1)
-                gl.depthMask(true);
             gl.enable(gl.CULL_FACE);
             gl.disable(gl.BLEND);
         }
@@ -927,19 +994,27 @@ const kInstancedShader = `
     gl_Position = u_transform * vec4(v2 + (a_pos - u_origin), 1.0);
   }
 #split
+  uniform vec3 u_fogColor;
+  uniform float u_fogDepth;
   uniform float u_frame;
   uniform sampler2DArray u_texture;
   in vec2 v_uv;
   out vec4 o_color;
 
   void main() {
-    o_color = texture(u_texture, vec3(v_uv, u_frame));
+    float depth = u_fogDepth * gl_FragCoord.w;
+    float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
+    vec4 color = texture(u_texture, vec3(v_uv, u_frame));
+    o_color = mix(color, vec4(u_fogColor, color[3]), fog);
     if (o_color[3] < 0.5) discard;
   }
 `;
 class InstancedShader extends Shader {
     constructor(gl) {
         super(gl, kInstancedShader);
+        this.u_fogColor = this.getUniformLocation('u_fogColor');
+        this.u_fogDepth = this.getUniformLocation('u_fogDepth');
+        this.u_frame = this.getUniformLocation('u_frame');
         this.u_frame = this.getUniformLocation('u_frame');
         this.u_origin = this.getUniformLocation('u_origin');
         this.u_billboard = this.getUniformLocation('u_billboard');
@@ -1084,22 +1159,27 @@ class InstancedManager {
     addMesh(frame, sprite) {
         return new InstancedMesh(this, this.meshes, frame, sprite);
     }
-    render(camera, planes, stats) {
+    render(camera, planes, stats, overlay) {
         const { billboard, gl, meshes, origin, origin_32, shader } = this;
         let drawn = 0;
         origin_32[0] = origin[0] = Math.floor(camera.position[0]);
         origin_32[1] = origin[1] = Math.floor(camera.position[1]);
         origin_32[2] = origin[2] = Math.floor(camera.position[2]);
         const transform = camera.getTransformFor(origin);
-        shader.bind();
         const pitch = -0.33 * camera.pitch;
         billboard[0] = Math.cos(camera.heading);
         billboard[1] = -Math.sin(camera.heading);
         billboard[2] = Math.cos(pitch);
         billboard[3] = -Math.sin(pitch);
+        const fog_color = overlay.getFogColor();
+        const fog_depth = overlay.getFogDepth(camera);
+        shader.bind();
         gl.uniform3fv(shader.u_origin, origin_32);
         gl.uniform4fv(shader.u_billboard, billboard);
+        gl.uniform3fv(shader.u_fogColor, fog_color);
+        gl.uniform1f(shader.u_fogDepth, fog_depth);
         gl.uniformMatrix4fv(shader.u_transform, false, transform);
+        gl.activeTexture(gl.TEXTURE0);
         for (const mesh of meshes) {
             if (mesh.draw(transform, stats))
                 drawn++;
@@ -1252,6 +1332,7 @@ class SpriteManager {
         billboard[2] = Math.cos(pitch);
         billboard[3] = -Math.sin(pitch);
         gl.uniform4fv(shader.u_billboard, billboard);
+        gl.activeTexture(gl.TEXTURE0);
         for (const mesh of meshes) {
             if (mesh.draw(camera, planes))
                 drawn++;
@@ -1262,7 +1343,6 @@ class SpriteManager {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-const kShadowAlpha = 0.36;
 const kShadowShader = `
   uniform float u_size;
   uniform mat4 u_transform;
@@ -1334,7 +1414,6 @@ class ShadowManager {
     }
     getBounds(size) {
         const result = this.bounds;
-        const half_size = 0.5 * size;
         for (let i = 0; i < 8; i++) {
             const offset = 3 * i;
             result[offset + 0] = (i & 1) ? size : -size;
@@ -1354,6 +1433,104 @@ class ShadowManager {
             if (mesh.draw(camera, planes))
                 drawn++;
         }
+        gl.disable(gl.BLEND);
+        gl.depthMask(true);
+        stats.drawn += drawn;
+        stats.total += meshes.length;
+    }
+}
+;
+//////////////////////////////////////////////////////////////////////////////
+const kHighlightShader = `
+  uniform int u_mask;
+  uniform mat4 u_transform;
+  in vec2 a_pos;
+
+  void main() {
+    int dim = gl_InstanceID >> 1;
+
+    const float epsilon = 1.0 / 256.0;
+    const float width = 1.0 + 2.0 * epsilon;
+
+    vec4 pos = vec4(0.0, 0.0, 0.0, 1.0);
+    float face_dir = 1.0 - float(gl_InstanceID & 1);
+    pos[(dim + 0) % 3] = width * face_dir - epsilon;
+    pos[(dim + 1) % 3] = width * a_pos[0] - epsilon;
+    pos[(dim + 2) % 3] = width * a_pos[1] - epsilon;
+
+    gl_Position = u_transform * pos;
+
+    bool hide = (u_mask & (1 << gl_InstanceID)) != 0;
+    if (hide) gl_Position[3] = 0.0;
+  }
+#split
+  out vec4 o_color;
+
+  void main() {
+    o_color = vec4(1.0, 1.0, 1.0, 0.4);
+  }
+`;
+class HighlightShader extends Shader {
+    constructor(gl) {
+        super(gl, kHighlightShader);
+        this.u_mask = this.getUniformLocation('u_mask');
+        this.u_transform = this.getUniformLocation('u_transform');
+    }
+}
+;
+class HighlightMesh extends Mesh {
+    constructor(manager, meshes) {
+        super(manager, meshes);
+        this.mask = 0;
+        this.size = 0;
+        this.manager = manager;
+    }
+    draw(camera, planes) {
+        if (!this.shown())
+            return false;
+        const transform = camera.getTransformFor(this.position);
+        const { gl, shader } = this;
+        gl.uniform1i(shader.u_mask, this.mask);
+        gl.uniformMatrix4fv(shader.u_transform, false, transform);
+        gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, 6);
+        return true;
+    }
+    setPosition(x, y, z) {
+        Vec3.set(this.position, x, y, z);
+    }
+    shown() {
+        return this.mask !== (1 << 6) - 1;
+    }
+}
+;
+class HighlightManager {
+    constructor(gl, unit_square_vao) {
+        this.gl = gl;
+        this.unit_square_vao = unit_square_vao;
+        this.shader = new HighlightShader(gl);
+        this.meshes = [];
+    }
+    addMesh() {
+        return new HighlightMesh(this, this.meshes);
+    }
+    render(camera, planes, stats) {
+        const { gl, meshes, shader, unit_square_vao } = this;
+        if (!meshes.some(x => x.shown())) {
+            stats.total += meshes.length;
+            return;
+        }
+        let drawn = 0;
+        // All highlight meshes are alpha-blended. None write to the depth map.
+        shader.bind();
+        gl.bindVertexArray(unit_square_vao);
+        gl.depthMask(false);
+        gl.enable(gl.BLEND);
+        gl.disable(gl.CULL_FACE);
+        for (const mesh of meshes) {
+            if (mesh.draw(camera, planes))
+                drawn++;
+        }
+        gl.enable(gl.CULL_FACE);
         gl.disable(gl.BLEND);
         gl.depthMask(true);
         stats.drawn += drawn;
@@ -1417,8 +1594,10 @@ class ScreenOverlay {
     getFogColor() {
         return this.fog_color;
     }
-    getFogDepth() {
-        return this.color[3] === 1 ? 1024 : 64;
+    getFogDepth(camera) {
+        if (this.color[3] !== 1)
+            return 64;
+        return Math.max(256, Math.min(2 * camera.position[1], 1024));
     }
     setColor(color) {
         for (let i = 0; i < 4; i++)
@@ -1439,18 +1618,20 @@ class ScreenOverlay {
 ;
 ;
 ;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
         const size = params.get('size') || 'small';
-        const base = size === 'small' ? '1' : '2';
-        const scale = parseFloat(params.get('scale') || base);
+        const scale = parseFloat(params.get('scale') || '1');
+        const antialias_base = size === 'small' ? '1' : '0';
+        const antialias = parseInt(params.get('antialias') || antialias_base);
         const container = nonnull(nonnull(canvas.parentElement).parentElement);
         container.classList.add(size);
         canvas.width = canvas.clientWidth / scale;
         canvas.height = canvas.clientHeight / scale;
         this.camera = new Camera(int(canvas.width), int(canvas.height));
-        const gl = nonnull(canvas.getContext('webgl2', { alpha: false }));
+        const gl = nonnull(canvas.getContext('webgl2', { alpha: false, antialias: antialias === 1 }));
         gl.viewport(0, 0, canvas.width, canvas.height);
         gl.enable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
@@ -1468,6 +1649,7 @@ class Renderer {
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
         this.gl = gl;
         this.overlay = new ScreenOverlay(gl, unit_square_vao);
+        this.highlight_manager = new HighlightManager(gl, unit_square_vao);
         this.instanced_manager = new InstancedManager(gl, allocator, atlas);
         this.shadow_manager = new ShadowManager(gl, unit_square_vao);
         this.sprite_manager = new SpriteManager(gl, atlas, unit_square_vao);
@@ -1475,6 +1657,9 @@ class Renderer {
     }
     addTexture(texture) {
         return this.voxels_manager.atlas.addTexture(texture);
+    }
+    addHighlightMesh() {
+        return this.highlight_manager.addMesh();
     }
     addInstancedMesh(frame, sprite) {
         return this.instanced_manager.addMesh(frame, sprite);
@@ -1498,11 +1683,11 @@ class Renderer {
         const planes = camera.getCullingPlanes();
         const stats = { drawn: 0, total: 0, drawnInstances: 0, totalInstances: 0 };
         this.sprite_manager.render(camera, planes, stats);
-        this.instanced_manager.render(camera, planes, stats);
+        this.instanced_manager.render(camera, planes, stats, overlay);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 0);
-        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
+        this.highlight_manager.render(camera, planes, stats);
         this.shadow_manager.render(camera, planes, stats);
-        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 2);
+        this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
         overlay.draw();
         return `${this.allocator.stats()}\r\n` +
             `Draw calls: ${stats.drawn} / ${stats.total}\r\n` +
