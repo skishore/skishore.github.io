@@ -579,7 +579,7 @@ class BufferAllocator {
         const usage = this.formatSize(bytes_usage);
         const alloc = this.formatSize(bytes_alloc);
         const total = this.formatSize(bytes_total);
-        return `VRAM: ${usage} / ${alloc} / ${total}Mb`;
+        return `Buffer: ${usage} / ${alloc} / ${total}Mb`;
     }
     formatSize(bytes) {
         return `${(bytes / (1024 * 1024)).toFixed(2)}`;
@@ -591,8 +591,19 @@ class BufferAllocator {
     }
 }
 ;
+class LightTexture {
+    constructor(data, allocator) {
+        this.allocator = allocator;
+        this.texture = this.allocator.alloc(data);
+    }
+    dispose() {
+        this.allocator.free(this.texture);
+    }
+}
+;
 class TextureAllocator {
     constructor(gl) {
+        this.bytes_alloc = 0;
         this.gl = gl;
         this.freeList = [];
     }
@@ -618,11 +629,15 @@ class TextureAllocator {
             gl.texParameteri(id, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
             gl.texParameteri(id, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
             gl.texParameteri(id, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            this.bytes_alloc += data.length;
             return texture;
         }
     }
     free(texture) {
         this.freeList.push(texture);
+    }
+    stats() {
+        return `Lights: ${(this.bytes_alloc / (1024 * 1024)).toFixed(2)}Mb`;
     }
 }
 ;
@@ -826,7 +841,7 @@ class VoxelMesh extends Mesh {
         gl.bindVertexArray(this.vao);
         if (this.light) {
             gl.uniform1i(this.manager.shader.u_hasLight, 1);
-            gl.bindTexture(TEXTURE_3D, this.light);
+            gl.bindTexture(TEXTURE_3D, this.light.texture);
         }
         else {
             gl.uniform1i(this.manager.shader.u_hasLight, 0);
@@ -844,9 +859,7 @@ class VoxelMesh extends Mesh {
         this.geo = geo;
     }
     setLight(light) {
-        if (this.light)
-            this.manager.talloc.free(this.light);
-        this.light = this.manager.talloc.alloc(light);
+        this.light = light;
     }
     setPosition(x, y, z) {
         Vec3.set(this.position, x, y, z);
@@ -862,9 +875,7 @@ class VoxelMesh extends Mesh {
         const { gl, light, quads } = this;
         gl.deleteVertexArray(this.vao);
         if (quads)
-            this.manager.balloc.free(quads);
-        if (light)
-            this.manager.talloc.free(light);
+            this.manager.allocator.free(quads);
         this.vao = null;
         this.quads = null;
         this.light = null;
@@ -897,15 +908,14 @@ class VoxelMesh extends Mesh {
     prepareQuads(data) {
         const n = this.geo.num_quads * Geometry.StrideInInt32;
         const subarray = data.length > n ? data.subarray(0, n) : data;
-        this.quads = this.manager.balloc.alloc(subarray, false);
+        this.quads = this.manager.allocator.alloc(subarray, false);
     }
 }
 ;
 class VoxelManager {
     constructor(gl, allocator) {
         this.gl = gl;
-        this.balloc = allocator;
-        this.talloc = new TextureAllocator(gl);
+        this.allocator = allocator;
         this.shader = new VoxelShader(gl);
         this.atlas = new TextureAtlas(gl);
         this.phases = [[], [], []];
@@ -1619,6 +1629,7 @@ class ScreenOverlay {
 ;
 ;
 ;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
@@ -1639,11 +1650,12 @@ class Renderer {
         gl.cullFace(gl.BACK);
         gl.disable(gl.BLEND);
         gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-        const allocator = new BufferAllocator(gl);
+        this.balloc = new BufferAllocator(gl);
+        this.talloc = new TextureAllocator(gl);
         const atlas = new SpriteAtlas(gl);
-        this.allocator = allocator;
+        const allocator = this.balloc;
         const unit_square_vao = nonnull(gl.createVertexArray());
-        const unit_square_buffer = this.allocator.alloc(kUnitSquarePos, false);
+        const unit_square_buffer = allocator.alloc(kUnitSquarePos, false);
         gl.bindVertexArray(unit_square_vao);
         gl.enableVertexAttribArray(0);
         gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
@@ -1654,6 +1666,9 @@ class Renderer {
         this.shadow_manager = new ShadowManager(gl, unit_square_vao);
         this.sprite_manager = new SpriteManager(gl, atlas, unit_square_vao);
         this.voxels_manager = new VoxelManager(gl, allocator);
+    }
+    addLightTexture(data) {
+        return new LightTexture(data, this.talloc);
     }
     addTexture(texture) {
         return this.voxels_manager.atlas.addTexture(texture);
@@ -1689,7 +1704,8 @@ class Renderer {
         this.shadow_manager.render(camera, planes, stats);
         this.voxels_manager.render(camera, planes, stats, overlay, move, wave, 1);
         overlay.draw();
-        return `${this.allocator.stats()}\r\n` +
+        return `${this.balloc.stats()}\r\n` +
+            `${this.talloc.stats()}\r\n` +
             `Draw calls: ${stats.drawn} / ${stats.total}\r\n` +
             `Instances: ${stats.drawnInstances} / ${stats.totalInstances}`;
     }

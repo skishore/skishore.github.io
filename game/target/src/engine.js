@@ -578,6 +578,7 @@ class Chunk {
         this.neighbors = 0;
         this.solid = null;
         this.water = null;
+        this.light = null;
         this.stage2_dirty = false;
         this.cx = cx;
         this.cz = cz;
@@ -716,13 +717,15 @@ class Chunk {
         return this.neighbors === kNeighbors.length;
     }
     dropMeshes() {
-        var _a, _b;
+        var _a, _b, _c;
         this.dropInstancedMeshes();
         if (this.hasMesh()) {
             this.world.frontier.markDirty(0);
         }
-        (_a = this.solid) === null || _a === void 0 ? void 0 : _a.dispose();
-        (_b = this.water) === null || _b === void 0 ? void 0 : _b.dispose();
+        (_a = this.light) === null || _a === void 0 ? void 0 : _a.dispose();
+        (_b = this.solid) === null || _b === void 0 ? void 0 : _b.dispose();
+        (_c = this.water) === null || _c === void 0 ? void 0 : _c.dispose();
+        this.light = null;
         this.solid = null;
         this.water = null;
         this.dirty = true;
@@ -897,7 +900,7 @@ class Chunk {
                     continue;
                 const source = test;
                 const target = source ^ mask;
-                const stride = 0xff00 ^ mask;
+                const stride = mask === 0x0f00 ? 0x1000 : 0x0100;
                 const neighbor_index = getIndex(nx, nz);
                 const neighbor_union = neighbor_index << 16;
                 const neighbor_chunk = nonnull(zone[neighbor_index]);
@@ -907,11 +910,12 @@ class Chunk {
                         continue;
                     prev.push(((index ^ mask) | neighbor_union));
                 }
-                for (let j = 0; j < kChunkWidth; j++) {
-                    const height = heightmap[(source >> 8) + j];
-                    const neighbor_height = neighbor_heightmap[(target >> 8) + j];
+                let offset = 0;
+                for (let j = 0; j < kChunkWidth; j++, offset += stride) {
+                    const height = heightmap[(source + offset) >> 8];
+                    const neighbor_height = neighbor_heightmap[(target + offset) >> 8];
                     for (let y = height; y < neighbor_height; y++) {
-                        prev.push(((target + y) | neighbor_union));
+                        prev.push(((target + offset + y) | neighbor_union));
                     }
                 }
             }
@@ -1097,7 +1101,7 @@ class Chunk {
         this.water = water;
     }
     setLightTexture() {
-        var _a, _b;
+        var _a, _b, _c;
         if (!this.hasMesh())
             return;
         // TODO(skishore): Share a texture between the two meshes.
@@ -1108,8 +1112,10 @@ class Chunk {
             saved.set(index, lights[index]);
             lights[index] = value;
         }
-        (_a = this.solid) === null || _a === void 0 ? void 0 : _a.setLight(lights);
-        (_b = this.water) === null || _b === void 0 ? void 0 : _b.setLight(lights);
+        (_a = this.light) === null || _a === void 0 ? void 0 : _a.dispose();
+        this.light = this.world.renderer.addLightTexture(lights);
+        (_b = this.solid) === null || _b === void 0 ? void 0 : _b.setLight(this.light);
+        (_c = this.water) === null || _c === void 0 ? void 0 : _c.setLight(this.light);
         for (const [index, value] of saved.entries()) {
             lights[index] = value;
         }
