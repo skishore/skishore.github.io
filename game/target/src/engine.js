@@ -586,7 +586,6 @@ class Chunk {
         this.instances = new Map();
         this.voxels = new Tensor3(kChunkWidth, kWorldHeight, kChunkWidth);
         this.heightmap = new Tensor2(kChunkWidth, kChunkWidth);
-        this.light_map = new Tensor2(kChunkWidth, kChunkWidth);
         this.equilevels = new Int8Array(kWorldHeight);
         this.stage1_dirty = [];
         this.stage1_edges = new Set();
@@ -603,14 +602,16 @@ class Chunk {
         this.dropMeshes();
         this.eachNeighbor(x => x.notifyNeighborDisposed());
     }
+    getLightLevel(x, y, z) {
+        const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
+        const index = int((xm << kChunkShiftX) | y | (zm << kChunkShiftZ));
+        const light = this.stage2_lights.get(index);
+        return light !== undefined ? light : int(this.stage1_lights.data[index]);
+    }
     getBlock(x, y, z) {
         const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
         const index = (xm << kChunkShiftX) | y | (zm << kChunkShiftZ);
         return this.voxels.data[index];
-    }
-    getLitHeight(x, z) {
-        const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
-        return this.light_map.get(xm, zm);
     }
     setBlock(x, y, z, block) {
         const voxels = this.voxels;
@@ -666,6 +667,8 @@ class Chunk {
         return this.dirty && this.ready;
     }
     relightChunk() {
+        // Called from remeshChunk to set the meshes' light textures, even if
+        // !this.needsRelight(). Each step checks a dirty flag so that's okay.
         this.eachNeighbor(x => x.lightingStage1());
         this.lightingStage1();
         this.lightingStage2();
@@ -785,7 +788,8 @@ class Chunk {
     lightingStage1() {
         if (this.stage1_dirty.length === 0)
             return;
-        const { heightmap, voxels } = this;
+        const heightmap_data = this.heightmap.data;
+        const voxels_data = this.voxels.data;
         const opaque = this.world.registry.opaque;
         const lights = this.stage1_lights;
         const edges = this.stage1_edges;
@@ -794,6 +798,8 @@ class Chunk {
         assert(lights.shape[2] === (1 << 4));
         assert(lights.stride[0] === (1 << 8));
         assert(lights.stride[2] === (1 << 12));
+        // Stage 1 lighting operates on "index" values, which are (x, y, z)
+        // coordinates represented as indices into our {lights, voxel} Tensor3.
         let prev = this.stage1_dirty;
         let next = [];
         // Returns true if the given index is on an x-z edge of the chunk.
@@ -802,11 +808,13 @@ class Chunk {
             const z_edge = (((index >> 12) + 1) & 0xf) < 2;
             return x_edge || z_edge;
         };
-        // Returns the updated lighting value at the given index.
+        // Returns the updated lighting value at the given index. Note that we
+        // can never use the `prev` light value in this computation: it can be
+        // arbitrarily out-of-date since the chunk contents can change.
         const query = (index) => {
-            if (opaque[voxels.data[index]])
+            if (opaque[voxels_data[index]])
                 return 0;
-            const height = heightmap.data[index >> 8];
+            const height = heightmap_data[index >> 8];
             if ((index & 0xff) >= height)
                 return kSunlightLevel;
             let max_neighbor = 1;
@@ -876,10 +884,16 @@ class Chunk {
             data[index] = chunk.stage1_lights.data;
             zone[index] = chunk;
         }
+        // Stage 1 lighting tracks nodes by "index", where an index can be used
+        // to look up a chunk (x, y, z) coordinate in a Tensor3. Stage 2 lighting
+        // deals with multiple chunks, so we deal with "locations". The first 16
+        // bits of a location are an index; bits 16:18 are a chunk x coordinate,
+        // and bits 18:20 are a chunk z coordinate.
+        //
         // To keep the cellular automaton as fast as possible, we update stage 1
-        // lighting in place, in place. We must undo this operation at the end of
-        // this method, so we track a list of (location, previous value) pairs in
-        // `deltas` as we make the updates.
+        // lighting in place. We must undo these changes at the end of this call,
+        // so we track a list of (location, previous value) pairs in `deltas` as
+        // we make the updates.
         //
         // To avoid needing Theta(n) heap allocations, we flatten `deltas`.
         const deltas = [];
@@ -950,15 +964,31 @@ class Chunk {
             }
             return -1;
         };
-        // Returns the updated lighting value at the given index.
-        const query = (location) => {
-            const chunk = zone[location >> 16];
-            const index = location & 0xffff;
-            if (opaque[chunk.voxels.data[index]])
-                return 0;
-            const height = chunk.heightmap.data[index >> 8];
-            if ((index & 0xff) >= height)
+        // Returns the updated lighting value at the given location.
+        //
+        // This helper carefully uses the `prev` light level ways that are
+        // not possible in stage 1, because we take advantage of the fact that
+        // stage 1 lighting is correct when we run stage 2. The stage 2 light at
+        // at a cell is always greater than or equal to the stage 1 light, so:
+        //
+        //   - If the current light level is non-zero, then the cell is definitely
+        //     not a solid cell (solid cells always have a light level of 0).
+        //
+        //   - If the current light level is kSunlightLevel, the maximum level,
+        //     then we don't need to examine neighbors; the light is unchanged.
+        //     Conversely, if the current light level is less than the max, then
+        //     the cell definitely isn't in unobstructed sunlight, since it would
+        //     have a stage 1 light of kSunlightLevel in that case.
+        //
+        const query = (location, prev) => {
+            if (prev === kSunlightLevel)
                 return kSunlightLevel;
+            if (prev === 0) {
+                const chunk = zone[location >> 16];
+                const index = location & 0xffff;
+                if (opaque[chunk.voxels.data[index]])
+                    return 0;
+            }
             let max_neighbor = 1;
             for (const spread of kSpread) {
                 const neighbor_index = shift(location, spread);
@@ -970,7 +1000,7 @@ class Chunk {
             }
             return int(max_neighbor - 1);
         };
-        // Enqueues new indices that may be affected by the given change.
+        // Enqueues new locations that may be affected by the given change.
         const enqueue = (location, hi, lo) => {
             for (const spread of kSpread) {
                 const neighbor_index = shift(location, spread);
@@ -986,7 +1016,7 @@ class Chunk {
                 // TODO(skishore): If the index is too far from the center given its
                 // current light value, drop the update here.
                 const prev = current(location);
-                const next = query(location);
+                const next = query(location, prev);
                 if (next === prev)
                     continue;
                 data[location >> 16][location & 0xffff] = next;
@@ -1056,7 +1086,7 @@ class Chunk {
     }
     remeshTerrain() {
         const { cx, cz, world } = this;
-        const { bedrock, buffer, heightmap, light_map, equilevels } = world;
+        const { bedrock, buffer, heightmap, equilevels } = world;
         equilevels.set(this.equilevels, 1);
         for (const offset of kNeighborOffsets) {
             const [c, dstPos, srcPos, size] = offset;
@@ -1065,12 +1095,10 @@ class Chunk {
             assert(delta === 1);
             if (chunk) {
                 this.copyHeightmap(heightmap, dstPos, chunk.heightmap, srcPos, size);
-                this.copyHeightmap(light_map, dstPos, chunk.light_map, srcPos, size);
                 this.copyVoxels(buffer, dstPos, chunk.voxels, srcPos, size);
             }
             else {
                 this.zeroHeightmap(heightmap, dstPos, size, delta);
-                this.zeroHeightmap(light_map, dstPos, size, delta);
                 this.zeroVoxels(buffer, dstPos, size);
             }
             if (chunk !== this) {
@@ -1093,7 +1121,7 @@ class Chunk {
             }
         }
         const x = cx << kChunkBits, z = cz << kChunkBits;
-        const meshed = world.mesher.meshChunk(buffer, heightmap, light_map, equilevels, this.solid, this.water);
+        const meshed = world.mesher.meshChunk(buffer, heightmap, equilevels, this.solid, this.water);
         const [solid, water] = meshed;
         solid === null || solid === void 0 ? void 0 : solid.setPosition(x, 0, z);
         water === null || water === void 0 ? void 0 : water.setPosition(x, 0, z);
@@ -1116,6 +1144,10 @@ class Chunk {
         this.light = this.world.renderer.addLightTexture(lights);
         (_b = this.solid) === null || _b === void 0 ? void 0 : _b.setLight(this.light);
         (_c = this.water) === null || _c === void 0 ? void 0 : _c.setLight(this.light);
+        for (const [index, instance] of this.instances.entries()) {
+            const level = int(Math.min(lights[index] + 1, kSunlightLevel));
+            instance.setLight(lighting(level));
+        }
         for (const [index, value] of saved.entries()) {
             lights[index] = value;
         }
@@ -1124,7 +1156,6 @@ class Chunk {
         const end = start + count;
         const offset = this.heightmap.index(xm, zm);
         const height = this.heightmap.data[offset];
-        const light_ = this.light_map.data[offset];
         const voxels = this.voxels;
         assert(voxels.stride[1] === 1);
         if (block === kEmptyBlock && start < height && height <= end) {
@@ -1137,18 +1168,6 @@ class Chunk {
         }
         else if (block !== kEmptyBlock && height <= end) {
             this.heightmap.data[offset] = end;
-        }
-        const opaque = this.world.registry.opaque;
-        if (!opaque[block] && start < light_ && light_ <= end) {
-            let i = 0;
-            for (; i < start; i++) {
-                if (opaque[voxels.data[index - i - 1]])
-                    break;
-            }
-            this.light_map.data[offset] = start - i;
-        }
-        else if (opaque[block] && light_ <= end) {
-            this.light_map.data[offset] = end;
         }
     }
     copyEquilevels(dst, chunk, srcPos, size, delta) {
@@ -1505,14 +1524,11 @@ class World {
         const h = int(kWorldHeight + 2);
         this.buffer = new Tensor3(w, h, w);
         this.heightmap = new Tensor2(w, w);
-        this.light_map = new Tensor2(w, w);
         this.equilevels = new Int8Array(h);
         this.equilevels[0] = this.equilevels[h - 1] = 1;
     }
-    isBlockLit(x, y, z) {
-        const cx = int(x >> kChunkBits), cz = int(z >> kChunkBits);
-        const chunk = this.chunks.get(cx, cz);
-        return chunk ? y >= chunk.getLitHeight(x, z) : true;
+    getLight(x, y, z) {
+        return lighting(this.getLightLevel(x, y, z));
     }
     getBlock(x, y, z) {
         if (y < 0)
@@ -1591,6 +1607,15 @@ class World {
         const dy = (cz << kChunkBits) + half - z;
         return dx * dx + dy * dy;
     }
+    getLightLevel(x, y, z) {
+        if (y < 0)
+            return 0;
+        if (y >= kWorldHeight)
+            return kSunlightLevel;
+        const cx = int(x >> kChunkBits), cz = int(z >> kChunkBits);
+        const chunk = this.chunks.get(cx, cz);
+        return chunk ? chunk.getLightLevel(x, y, z) : kSunlightLevel;
+    }
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
@@ -1601,11 +1626,9 @@ const kTmpDelta = Vec3.create();
 const kTmpImpacts = Vec3.create();
 const kMinZLowerBound = 0.001;
 const kMinZUpperBound = 0.1;
+const lighting = (x) => Math.pow(0.8, kSunlightLevel - x);
 class Env {
     constructor(id) {
-        this.cameraAlpha = 0;
-        this.cameraBlock = kEmptyBlock;
-        this.cameraColor = kWhite;
         this.highlightSide = -1;
         this.frame = 0;
         this.container = new Container(id);
@@ -1615,6 +1638,8 @@ class Env {
         this.world = new World(this.registry, this.renderer);
         this.highlight = this.renderer.addHighlightMesh();
         this.highlightPosition = Vec3.create();
+        this.cameraColor = kWhite.slice();
+        this.cameraMaterial = kNoMaterial;
         const remesh = this.world.remesh.bind(this.world);
         const render = this.render.bind(this);
         const update = this.update.bind(this);
@@ -1640,7 +1665,10 @@ class Env {
     render(dt) {
         if (!this.container.inputs.pointer)
             return;
-        this.frame = int((this.frame + 1) & 0xffff);
+        const old_frame = this.frame;
+        this.frame = old_frame + 60 * dt;
+        if (this.frame > 0xffff)
+            this.frame -= 0xffff;
         const pos = this.frame / 256;
         const rad = 2 * Math.PI * pos;
         const move = 0.25 * (Math.cos(rad) * 0.5 + pos);
@@ -1652,7 +1680,8 @@ class Env {
         this.entities.render(dt);
         this.updateHighlightMesh();
         this.updateOverlayColor(wave);
-        const renderer_stats = this.renderer.render(move, wave);
+        const sparkle = int(old_frame) !== int(this.frame);
+        const renderer_stats = this.renderer.render(move, wave, sparkle);
         const timing = this.timing;
         if (timing.renderPerf.frame() % 20 !== 0)
             return;
@@ -1792,38 +1821,31 @@ class Env {
             boundary = Math.abs(delta);
             return delta > 0 ? kEmptyBlock : below;
         })();
-        const old_block = this.cameraBlock;
-        this.cameraBlock = new_block;
+        const new_material = (() => {
+            if (new_block === kEmptyBlock)
+                return kNoMaterial;
+            return this.registry.getBlockFaceMaterial(new_block, 3);
+        })();
+        const old_material = this.cameraMaterial;
+        this.cameraMaterial = new_material;
         const max = kMinZUpperBound;
         const min = kMinZLowerBound;
         const minZ = Math.max(Math.min(boundary / 2, max), min);
         this.renderer.camera.setMinZ(minZ);
-        if (new_block === kEmptyBlock) {
-            const changed = new_block !== old_block;
+        if (new_material === kNoMaterial) {
+            const changed = new_material !== old_material;
             if (changed)
                 this.renderer.setOverlayColor(kWhite);
             return;
         }
-        if (new_block !== old_block) {
-            const material = this.registry.getBlockFaceMaterial(new_block, 3);
-            const color = material !== kNoMaterial
-                ? this.registry.getMaterialData(material).texture.color
-                : kWhite;
-            this.cameraColor = color.slice();
-            this.cameraAlpha = color[3];
-        }
-        const falloff = (() => {
-            const max = 2, step = 32;
-            const limit = max * step;
-            for (let i = 1; i < limit; i++) {
-                const other = this.world.getBlock(xi, int(yi + i), zi);
-                if (other !== new_block)
-                    return Math.pow(2, i / step);
-            }
-            return Math.pow(2, max);
-        })();
-        this.cameraColor[3] = 1 - (1 - this.cameraAlpha) / falloff;
-        this.renderer.setOverlayColor(this.cameraColor);
+        const color = this.registry.getMaterialData(new_material).texture.color;
+        const light = this.world.getLight(xi, yi, zi);
+        const saved = this.cameraColor;
+        saved[0] = color[0] * light;
+        saved[1] = color[1] * light;
+        saved[2] = color[2] * light;
+        saved[3] = color[3];
+        this.renderer.setOverlayColor(saved);
     }
 }
 ;

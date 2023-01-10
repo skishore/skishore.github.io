@@ -745,9 +745,9 @@ const Meshes = (env) => ({
             if (!state.mesh)
                 continue;
             const { x, y, z, h } = env.position.getX(state.id);
-            const lit = env.world.isBlockLit(int(Math.floor(x)), int(Math.floor(y)), int(Math.floor(z)));
+            const light = env.world.getLight(int(Math.floor(x)), int(Math.floor(y)), int(Math.floor(z)));
             state.mesh.setPosition(x, y - h / 2, z);
-            state.mesh.setLight(lit ? 1 : 0.64);
+            state.mesh.setLight(light);
             state.mesh.setHeight(h);
             if (state.heading !== null) {
                 const camera_heading = Math.atan2(x - cx, z - cz);

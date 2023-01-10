@@ -699,7 +699,6 @@ class Mesh {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-const kShadowAlpha = 0.36;
 const kVoxelShader = `
   uniform ivec2 u_mask;
   uniform float u_move;
@@ -712,13 +711,13 @@ const kVoxelShader = `
   in uint  a_ao;
   in uint  a_mask;
   in uint  a_texture;
-  // 4-bit wave; 2-bit dim; 1-bit dir; 1-bit lit
+  // 4-bit wave; 2-bit dim; 1-bit dir
   in int   a_wddl;
 
   out vec3 v_pos;
   out vec3 v_uvw;
+  out float v_ao;
   out float v_move;
-  out float v_light;
 
   int unpackI2(uint packed, int index) {
     return (int(packed) >> (2 * index)) & 3;
@@ -728,9 +727,7 @@ const kVoxelShader = `
     int instance = gl_VertexID + 3 * (gl_InstanceID & 1);
     int index = unpackI2(a_indices, instance);
 
-    float shadow = a_wddl < 0 ? 0.0 : 0.0;
-    float ao = 1.0 - 0.3 * float(unpackI2(a_ao, index));
-    v_light = ao * (1.0 - ${kShadowAlpha} * shadow);
+    v_ao = 1.0 - 0.3 * float(unpackI2(a_ao, index));
 
     int dim = (a_wddl >> 4) & 0x3;
     float dir = ((a_wddl & 64) != 0) ? 1.0 : -1.0;
@@ -774,20 +771,22 @@ const kVoxelShader = `
   uniform sampler3D u_light;
   in vec3 v_pos;
   in vec3 v_uvw;
+  in float v_ao;
   in float v_move;
-  in float v_light;
   out vec4 o_color;
 
   void main() {
-    bool hasLight = u_hasLight == 1;
-    ivec3 texel = ivec3(int(v_pos[1]), int(v_pos[0]), int(v_pos[2]));
+    bool hasLight = u_hasLight == 1 && v_pos[1] <= 255.0;
+    ivec3 texel = ivec3(clamp(int(v_pos[1]), 0, 0xff),
+                        clamp(int(v_pos[0]), 0, 0xf),
+                        clamp(int(v_pos[2]), 0, 0xf));
     float level = hasLight ? 256.0 * texelFetch(u_light, texel, 0)[0] : 15.0;
     float light = pow(0.8, 15.0 - level);
 
     float depth = u_fogDepth * gl_FragCoord.w;
     float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
     vec3 index = v_uvw + vec3(v_move, v_move, 0.0);
-    vec4 color = vec4(vec3(light * v_light), 1.0) * texture(u_texture, index);
+    vec4 color = vec4(vec3(light * v_ao), 1.0) * texture(u_texture, index);
     o_color = mix(color, vec4(u_fogColor, color[3]), fog);
     if (o_color[3] < 0.5 * u_alphaTest) discard;
   }
@@ -974,6 +973,9 @@ class Instance {
     dispose() {
         this.mesh.removeInstance(this.index);
     }
+    setLight(light) {
+        this.mesh.setInstanceLight(this.index, light);
+    }
     setPosition(x, y, z) {
         this.mesh.setInstancePosition(this.index, x, y, z);
     }
@@ -984,7 +986,9 @@ const kInstancedShader = `
   uniform vec4 u_billboard;
   uniform mat4 u_transform;
   in vec3 a_pos;
+  in float a_light;
   out vec2 v_uv;
+  out float v_light;
 
   void main() {
     int index = gl_VertexID + (gl_VertexID > 0 ? gl_InstanceID & 1 : 0);
@@ -992,6 +996,7 @@ const kInstancedShader = `
     float w = float(((index + 1) & 3) >> 1);
     float h = float(((index + 0) & 3) >> 1);
     v_uv = vec2(w, 1.0 - h);
+    v_light = a_light;
 
     float y = 0.5;
     vec3 v0 = vec3(w - 0.5, h, 0.0);
@@ -1009,13 +1014,15 @@ const kInstancedShader = `
   uniform float u_frame;
   uniform sampler2DArray u_texture;
   in vec2 v_uv;
+  in float v_light;
   out vec4 o_color;
 
   void main() {
     float depth = u_fogDepth * gl_FragCoord.w;
     float fog = clamp(exp2(-depth * depth), 0.0, 1.0);
+    vec4 light = vec4(vec3(v_light), 1.0);
     vec4 color = texture(u_texture, vec3(v_uv, u_frame));
-    o_color = mix(color, vec4(u_fogColor, color[3]), fog);
+    o_color = mix(light * color, vec4(u_fogColor, color[3]), fog);
     if (o_color[3] < 0.5) discard;
   }
 `;
@@ -1030,6 +1037,7 @@ class InstancedShader extends Shader {
         this.u_billboard = this.getUniformLocation('u_billboard');
         this.u_transform = this.getUniformLocation('u_transform');
         this.a_pos = this.getAttribLocation('a_pos');
+        this.a_light = this.getAttribLocation('a_light');
     }
 }
 ;
@@ -1073,7 +1081,6 @@ class InstancedMesh extends Mesh {
         }
         const index = int(instances.length);
         const instance = new Instance(this, index);
-        this.setInstancePosition(index, 0, 0, 0);
         instances.push(instance);
         return instance;
     }
@@ -1094,9 +1101,21 @@ class InstancedMesh extends Mesh {
         instances[index] = popped;
         popped.index = index;
     }
-    setInstancePosition(index, x, y, z) {
+    setInstanceLight(index, light) {
+        const data = this.data;
+        if (data === null)
+            return;
         const offset = index * InstancedMesh.Stride;
-        const data = nonnull(this.data);
+        if (data[offset + 3] === light)
+            return;
+        data[offset + 3] = light;
+        this.dirtyInstances.add(index);
+    }
+    setInstancePosition(index, x, y, z) {
+        const data = this.data;
+        if (data === null)
+            return;
+        const offset = index * InstancedMesh.Stride;
         data[offset + 0] = x;
         data[offset + 1] = y;
         data[offset + 2] = z;
@@ -1131,6 +1150,8 @@ class InstancedMesh extends Mesh {
             gl.bindBuffer(ARRAY_BUFFER, buffer.buffer);
             for (const index of dirtyInstances.values()) {
                 const offset = index * stride;
+                if (offset >= data.length)
+                    continue;
                 gl.bufferSubData(ARRAY_BUFFER, 4 * offset, data, offset, stride);
             }
             dirtyInstances.clear();
@@ -1141,6 +1162,7 @@ class InstancedMesh extends Mesh {
         gl.bindVertexArray(this.vao);
         gl.bindBuffer(ARRAY_BUFFER, nonnull(this.buffer).buffer);
         this.prepareAttribute(shader.a_pos, 3, 0);
+        this.prepareAttribute(shader.a_light, 1, 3);
     }
     prepareAttribute(location, size, offset_in_floats) {
         if (location === null)
@@ -1153,7 +1175,7 @@ class InstancedMesh extends Mesh {
         gl.vertexAttribDivisor(location, 2);
     }
 }
-InstancedMesh.Stride = 3;
+InstancedMesh.Stride = 4;
 ;
 class InstancedManager {
     constructor(gl, allocator, atlas) {
@@ -1353,6 +1375,7 @@ class SpriteManager {
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
+const kShadowAlpha = 0.25;
 const kShadowShader = `
   uniform float u_size;
   uniform mat4 u_transform;
@@ -1630,6 +1653,7 @@ class ScreenOverlay {
 ;
 ;
 ;
+;
 class Renderer {
     constructor(canvas) {
         const params = new URLSearchParams(window.location.search);
@@ -1688,12 +1712,13 @@ class Renderer {
     addVoxelMesh(geo, phase) {
         return this.voxels_manager.addMesh(geo, phase);
     }
-    render(move, wave) {
+    render(move, wave, sparkle) {
         const { gl, overlay } = this;
         const [r, g, b] = kDefaultSkyColor;
         gl.clearColor(r, g, b, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-        this.voxels_manager.atlas.sparkle();
+        if (sparkle)
+            this.voxels_manager.atlas.sparkle();
         const camera = this.camera;
         const planes = camera.getCullingPlanes();
         const stats = { drawn: 0, total: 0, drawnInstances: 0, totalInstances: 0 };
