@@ -124,6 +124,7 @@ class Registry {
     constructor() {
         this.opaque = [false, false];
         this.solid = [false, true];
+        this.light = [0, 0];
         this.faces = [];
         for (let i = 0; i < 12; i++) {
             this.faces.push(kNoMaterial);
@@ -132,7 +133,7 @@ class Registry {
         this.materials = [];
         this.ids = new Map();
     }
-    addBlock(xs, solid) {
+    addBlock(xs, solid, light = 0) {
         const materials = (() => {
             switch (xs.length) {
                 // All faces for this block use same material.
@@ -160,19 +161,22 @@ class Registry {
             if (alphaBlend || alphaTest)
                 opaque = false;
         });
+        light = opaque && light === 0 ? -1 : light;
         const result = this.opaque.length;
         this.opaque.push(opaque);
         this.solid.push(solid);
+        this.light.push(light);
         this.meshes.push(null);
         return result;
     }
-    addBlockMesh(mesh, solid) {
+    addBlockMesh(mesh, solid, light = 0) {
         const result = this.opaque.length;
         for (let i = 0; i < 6; i++)
             this.faces.push(kNoMaterial);
         this.meshes.push(mesh);
         this.opaque.push(false);
         this.solid.push(solid);
+        this.light.push(light);
         return result;
     }
     addMaterial(name, texture, liquid = false) {
@@ -606,7 +610,11 @@ class Chunk {
         const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
         const index = int((xm << kChunkShiftX) | y | (zm << kChunkShiftZ));
         const light = this.stage2_lights.get(index);
-        return light !== undefined ? light : int(this.stage1_lights.data[index]);
+        const base = light !== undefined ? light : this.stage1_lights.data[index];
+        const registry = this.world.registry;
+        const block = this.voxels.data[index];
+        const mesh = registry.getBlockMesh(block);
+        return int(Math.min(base + (mesh ? 1 : 0), kSunlightLevel));
     }
     getBlock(x, y, z) {
         const xm = int(x & kChunkMask), zm = int(z & kChunkMask);
@@ -655,6 +663,12 @@ class Chunk {
         assert(voxels.stride[1] === 1);
         const index = voxels.index(xm, start, zm);
         voxels.data.fill(block, index, index + count);
+        const light = this.world.registry.light[block];
+        if (light > 0) {
+            for (let i = 0; i < count; i++) {
+                this.stage1_dirty.push(int(index + i));
+            }
+        }
         this.updateHeightmap(xm, zm, index, start, count, block);
     }
     hasMesh() {
@@ -790,7 +804,7 @@ class Chunk {
             return;
         const heightmap_data = this.heightmap.data;
         const voxels_data = this.voxels.data;
-        const opaque = this.world.registry.opaque;
+        const block_light = this.world.registry.light;
         const lights = this.stage1_lights;
         const edges = this.stage1_edges;
         const data = lights.data;
@@ -812,12 +826,13 @@ class Chunk {
         // can never use the `prev` light value in this computation: it can be
         // arbitrarily out-of-date since the chunk contents can change.
         const query = (index) => {
-            if (opaque[voxels_data[index]])
+            const from_block = block_light[voxels_data[index]];
+            if (from_block < 0)
                 return 0;
             const height = heightmap_data[index >> 8];
             if ((index & 0xff) >= height)
                 return kSunlightLevel;
-            let max_neighbor = 1;
+            let max_neighbor = from_block + 1;
             for (const spread of kSpread) {
                 if ((index & spread.mask) === spread.test)
                     continue;
@@ -989,7 +1004,7 @@ class Chunk {
                 if (opaque[chunk.voxels.data[index]])
                     return 0;
             }
-            let max_neighbor = 1;
+            let max_neighbor = prev + 1;
             for (const spread of kSpread) {
                 const neighbor_index = shift(location, spread);
                 if (neighbor_index >= 0) {

@@ -279,7 +279,7 @@ const handleJumping = (dt, state, body, grounded) => {
     const height = body.min[1];
     const factor = height / kWorldHeight;
     const density = factor > 1 ? Math.exp(1 - factor) : 1;
-    const penalty = movementPenalty(state, body) * density;
+    const penalty = density * (body.inFluid ? state.waterPenalty : 1);
     state._jumped = true;
     state._jumpTimeLeft = state.jumpTime;
     body.impulses[1] += state.jumpImpulse * penalty;
@@ -906,6 +906,7 @@ const main = () => {
         bedrock: registry.addBlock(['bedrock'], true),
         bush: registry.addBlockMesh(block(10, 0), false),
         dirt: registry.addBlock(['dirt'], true),
+        fungi: registry.addBlockMesh(block(13, 0), false, 9),
         grass: registry.addBlock(['grass', 'dirt', 'grass-side'], true),
         rock: registry.addBlockMesh(block(9, 0), true),
         sand: registry.addBlock(['sand'], true),

@@ -54,8 +54,9 @@ const mgv7_np_terrain_cliff = minetest_noise_2d(8, 16, 512, 6, 0.6, 2.0);
 const mgv7_mountain_ridge = ridgeNoise(8, 0.5, 0.002);
 const cave_noises = new Array(2 * kCaveLevels).fill(null).map(noise2D);
 // Cave generation.
-const carve_caves = (x, z, column, limit) => {
-    let result = 0;
+const carve_caves = (blocks, x, z, column, limit, height) => {
+    let max = 0;
+    let min = kWorldHeight;
     const start = kSeaLevel - kCaveDeltaY * (kCaveLevels - 1) / 2;
     for (let i = 0; i < kCaveLevels; i++) {
         const carver_noise = cave_noises[2 * i + 0];
@@ -71,10 +72,14 @@ const carve_caves = (x, z, column, limit) => {
             for (let i = ay; i < by; i++) {
                 column.overwrite(kEmptyBlock, int(i));
             }
-            result = int(Math.max(result, by));
+            max = int(Math.max(max, by));
+            min = int(Math.min(min, ay));
         }
     }
-    return result;
+    if (max < height && max < limit && (hash_point(x, z) & 63) === 4) {
+        column.overwrite(blocks.fungi, min);
+    }
+    return max;
 };
 // Tree generation.
 const randomness = new Uint8Array(1 << 20);
@@ -148,6 +153,7 @@ const kDefaultBlocks = {
     bedrock: kEmptyBlock,
     bush: kEmptyBlock,
     dirt: kEmptyBlock,
+    fungi: kEmptyBlock,
     grass: kEmptyBlock,
     rock: kEmptyBlock,
     sand: kEmptyBlock,
@@ -198,7 +204,7 @@ const loadChunk = (blocks) => (x, z, column) => {
             limit = int(Math.min(limit, neighbor_height - 1));
         }
     }
-    const cave_height = carve_caves(x, z, column, limit);
+    const cave_height = carve_caves(blocks, x, z, column, limit, height);
     if (tile === blocks.grass && cave_height < height) {
         const hash = hash_point(x, z) & 63;
         if (hash < 2)
