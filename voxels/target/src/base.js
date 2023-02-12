@@ -1,3 +1,4 @@
+const int = (x) => (x | 0);
 const assert = (x, message) => {
     if (x)
         return;
@@ -281,33 +282,33 @@ class Tensor2 {
         this.stride = [1, x];
     }
     get(x, y) {
-        return this.data[this.index(x, y)];
+        return int(this.data[this.index(x, y)]);
     }
     set(x, y, value) {
         this.data[this.index(x, y)] = value;
     }
     index(x, y) {
-        return x * this.stride[0] + y * this.stride[1];
+        return int(x * this.stride[0] + y * this.stride[1]);
     }
 }
 ;
 class Tensor3 {
     constructor(x, y, z) {
-        this.data = new Int16Array(x * y * z);
+        this.data = new Uint8Array(x * y * z);
         this.shape = [x, y, z];
-        this.stride = [y, 1, x * y];
+        this.stride = [y, 1, int(x * y)];
     }
     get(x, y, z) {
-        return this.data[this.index(x, y, z)];
+        return int(this.data[this.index(x, y, z)]);
     }
     set(x, y, z, value) {
         this.data[this.index(x, y, z)] = value;
     }
     index(x, y, z) {
-        return x * this.stride[0] + y * this.stride[1] + z * this.stride[2];
+        return int(x * this.stride[0] + y * this.stride[1] + z * this.stride[2]);
     }
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-export { assert, drop, nonnull, only, Mat4, Tensor2, Tensor3, Vec3 };
+export { assert, drop, int, nonnull, only, Mat4, Tensor2, Tensor3, Vec3 };
 //# sourceMappingURL=base.js.map

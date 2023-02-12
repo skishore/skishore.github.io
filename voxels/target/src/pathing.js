@@ -144,7 +144,8 @@ class AStarNode extends Point {
     }
 }
 const AStarHeapCheckInvariants = (heap) => {
-    return; // Comment this line out to enable debug checks.
+    if (1 === 1)
+        return; // Comment this line out to enable debug checks.
     heap.map(x => `(${x.index}, ${x.score})`).join('; ');
     heap.forEach((node, index) => {
         const debug = (label) => {

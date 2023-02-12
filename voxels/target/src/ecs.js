@@ -1,4 +1,4 @@
-import { assert } from './base.js';
+import { assert, int } from './base.js';
 ;
 const kNoEntity = 0;
 ;
@@ -19,11 +19,20 @@ class ComponentStore {
             throw new Error(`${entity} missing ${this.component}`);
         return result;
     }
+    each(fn) {
+        this.states.forEach(fn);
+    }
+    every(fn) {
+        return this.states.every(fn);
+    }
+    some(fn) {
+        return this.states.some(fn);
+    }
     add(entity) {
         if (this.lookup.has(entity)) {
             throw new Error(`Duplicate for ${entity}: ${this.component}`);
         }
-        const index = this.states.length;
+        const index = int(this.states.length);
         const state = this.definition.init();
         state.id = entity;
         state.index = index;
@@ -67,7 +76,7 @@ class ComponentStore {
 ;
 class EntityComponentSystem {
     constructor() {
-        this.last = 0;
+        this.last = kNoEntity;
         this.reusable = [];
         this.components = new Map();
         this.onRenders = [];

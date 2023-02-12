@@ -1,5 +1,5 @@
-import { Vec3 } from './base.js';
-const kSweepShift = 8;
+import { int, Vec3 } from './base.js';
+const kSweepShift = 12;
 const kSweepResolution = 1 << kSweepShift;
 const kSweepMask = kSweepResolution - 1;
 const kSpeeds = [0, 0, 0, 0];
@@ -60,7 +60,8 @@ const sweep = (min, max, delta, impacts, check, stop_on_impact = false) => {
             let done = false;
             for (kVoxel[j] = jlo; !done && kVoxel[j] <= jhi; kVoxel[j]++) {
                 for (kVoxel[k] = klo; !done && kVoxel[k] <= khi; kVoxel[k]++) {
-                    if (check(kVoxel))
+                    const x = int(kVoxel[0]), y = int(kVoxel[1]), z = int(kVoxel[2]);
+                    if (check(x, y, z))
                         continue;
                     impacts[i] = direction;
                     min[i] -= direction;

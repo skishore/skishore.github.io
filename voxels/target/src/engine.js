@@ -1,9 +1,10 @@
-import { assert, nonnull } from './base.js';
-import { Tensor2, Tensor3, Vec3 } from './base.js';
+import { assert, int, nonnull } from './base.js';
+import { Vec3 } from './base.js';
 import { EntityComponentSystem } from './ecs.js';
+import { Geometry } from './renderer.js';
 import { Renderer } from './renderer.js';
-import { TerrainMesher } from './mesher.js';
 import { kSweepResolution, sweep } from './sweep.js';
+;
 class Container {
     constructor(id) {
         this.element = nonnull(document.getElementById(id), () => id);
@@ -15,6 +16,7 @@ class Container {
             down: false,
             right: false,
             hover: false,
+            call: false,
             space: false,
             mouse0: false,
             mouse1: false,
@@ -22,12 +24,13 @@ class Container {
         };
         this.deltas = { x: 0, y: 0, scroll: 0 };
         this.bindings = new Map();
-        this.bindings.set('W'.charCodeAt(0), 'up');
-        this.bindings.set('A'.charCodeAt(0), 'left');
-        this.bindings.set('S'.charCodeAt(0), 'down');
-        this.bindings.set('D'.charCodeAt(0), 'right');
-        this.bindings.set('E'.charCodeAt(0), 'hover');
-        this.bindings.set(' '.charCodeAt(0), 'space');
+        this.addBinding('W', 'up');
+        this.addBinding('A', 'left');
+        this.addBinding('S', 'down');
+        this.addBinding('D', 'right');
+        this.addBinding('E', 'hover');
+        this.addBinding('Q', 'call');
+        this.addBinding(' ', 'space');
         const canvas = this.canvas;
         const target = nonnull(this.canvas.parentElement);
         target.addEventListener('click', (e) => {
@@ -48,6 +51,10 @@ class Container {
         if (this.stats)
             this.stats.textContent = stats;
     }
+    addBinding(key, input) {
+        assert(key.length === 1);
+        this.bindings.set(int(key.charCodeAt(0)), { input, handled: false });
+    }
     insistOnPointerLock() {
         if (!this.inputs.pointer)
             return;
@@ -59,12 +66,14 @@ class Container {
     onKeyInput(e, down) {
         if (!this.inputs.pointer)
             return;
-        const keycode = e.keyCode;
+        const keycode = int(e.keyCode);
         if (keycode === 27)
             return this.onMimicPointerLock(e, false);
-        const input = this.bindings.get(keycode);
-        if (input)
-            this.onInput(e, input, down);
+        const binding = this.bindings.get(keycode);
+        if (!binding || binding.handled === down)
+            return;
+        this.onInput(e, binding.input, down);
+        binding.handled = down;
     }
     onMouseDown(e) {
         if (!this.inputs.pointer)
@@ -105,23 +114,31 @@ class Container {
 }
 ;
 ;
+;
 const kBlack = [0, 0, 0, 1];
 const kWhite = [1, 1, 1, 1];
 const kNoMaterial = 0;
 const kEmptyBlock = 0;
 const kUnknownBlock = 1;
 class Registry {
-    constructor() {
+    constructor(helper, renderer) {
         this.opaque = [false, false];
         this.solid = [false, true];
+        this.light = [0, 0];
         this.faces = [];
         for (let i = 0; i < 12; i++) {
             this.faces.push(kNoMaterial);
         }
+        this.meshes = [null, null];
         this.materials = [];
         this.ids = new Map();
+        this.helper = helper;
+        this.renderer = renderer;
+        this.helper.block_to_instance = this.meshes;
+        this.registerBlock(kEmptyBlock);
+        this.registerBlock(kUnknownBlock);
     }
-    addBlock(xs, solid) {
+    addBlock(xs, solid, light = 0) {
         const materials = (() => {
             switch (xs.length) {
                 // All faces for this block use same material.
@@ -143,36 +160,63 @@ class Registry {
                 throw new Error(`Unknown material: ${x}`);
             const material = id + 1;
             this.faces.push(material);
-            const data = this.getMaterialData(material);
-            const alphaBlend = data.color[3] < 1;
-            const alphaTest = data.texture && data.texture.alphaTest;
+            const texture = this.getMaterialData(material).texture;
+            const alphaBlend = texture.color[3] < 1;
+            const alphaTest = texture.alphaTest;
             if (alphaBlend || alphaTest)
                 opaque = false;
         });
+        light = opaque && light === 0 ? -1 : light;
         const result = this.opaque.length;
         this.opaque.push(opaque);
         this.solid.push(solid);
+        this.light.push(light);
+        this.meshes.push(null);
+        this.registerBlock(result);
         return result;
     }
-    addMaterialOfColor(name, color, liquid = false) {
-        this.addMaterialHelper(name, color, liquid, null);
+    addBlockMesh(mesh, solid, light = 0) {
+        const result = this.opaque.length;
+        for (let i = 0; i < 6; i++)
+            this.faces.push(kNoMaterial);
+        this.meshes.push(mesh);
+        this.opaque.push(false);
+        this.solid.push(solid);
+        this.light.push(light);
+        this.registerBlock(result);
+        return result;
     }
-    addMaterialOfTexture(name, texture, color = kWhite, liquid = false) {
-        this.addMaterialHelper(name, color, liquid, texture);
+    addMaterial(name, texture, liquid = false) {
+        assert(name.length > 0, () => 'Empty material name!');
+        assert(!this.ids.has(name), () => `Duplicate material: ${name}`);
+        const id = this.materials.length;
+        const textureIndex = this.renderer.addTexture(texture);
+        this.ids.set(name, id);
+        this.materials.push({ liquid, texture, textureIndex });
+        this.registerMaterial(id);
     }
     // faces has 6 elements for each block type: [+x, -x, +y, -y, +z, -z]
     getBlockFaceMaterial(id, face) {
         return this.faces[id * 6 + face];
     }
+    getBlockMesh(id) {
+        return this.meshes[id];
+    }
     getMaterialData(id) {
         assert(0 < id && id <= this.materials.length);
         return this.materials[id - 1];
     }
-    addMaterialHelper(name, color, liquid, texture) {
-        assert(name.length > 0, () => 'Empty material name!');
-        assert(!this.ids.has(name), () => `Duplicate material: ${name}`);
-        this.ids.set(name, this.materials.length);
-        this.materials.push({ color, liquid, texture, textureIndex: 0 });
+    registerBlock(id) {
+        assert(0 <= id && id < this.opaque.length);
+        const b = 6 * id;
+        const faces = this.faces;
+        this.helper.module.asm.registerBlock(id, !!this.meshes[id], this.opaque[id], this.solid[id], this.light[id], faces[b + 0], faces[b + 1], faces[b + 2], faces[b + 3], faces[b + 4], faces[b + 5]);
+    }
+    registerMaterial(id) {
+        assert(0 <= id && id < this.materials.length);
+        const material = this.materials[id];
+        const [r, g, b, a] = material.texture.color;
+        this.helper.module.asm.registerMaterial(id, material.liquid, material.texture.alphaTest, material.textureIndex, r, g, b, a);
     }
 }
 ;
@@ -192,8 +236,8 @@ class Performance {
     end() {
         const index = this.index;
         const next_index = index + 1;
-        this.index = next_index < this.ticks.length ? next_index : 0;
-        const tick = Math.round(1000 * (this.now.now() - this.last));
+        this.index = int(next_index < this.ticks.length ? next_index : 0);
+        const tick = int(Math.round(1000 * (this.now.now() - this.last)));
         this.sum += tick - this.ticks[index];
         this.ticks[index] = tick;
     }
@@ -211,10 +255,11 @@ class Performance {
 //////////////////////////////////////////////////////////////////////////////
 const kTickResolution = 4;
 const kTicksPerFrame = 4;
-const kTicksPerSecond = 30;
+const kTicksPerSecond = 60;
 class Timing {
-    constructor(render, update) {
+    constructor(remesh, render, update) {
         this.now = performance || Date;
+        this.remesh = remesh;
         this.render = render;
         this.update = update;
         const now = this.now.now();
@@ -226,6 +271,7 @@ class Timing {
         this.updateLimit = this.updateDelay * kTicksPerFrame;
         const updateInterval = this.updateDelay / kTickResolution;
         setInterval(this.updateHandler.bind(this), updateInterval);
+        this.remeshPerf = new Performance(this.now, 60);
         this.renderPerf = new Performance(this.now, 60);
         this.updatePerf = new Performance(this.now, 60);
     }
@@ -233,17 +279,18 @@ class Timing {
         requestAnimationFrame(this.renderBinding);
         this.updateHandler();
         const now = this.now.now();
-        const dt = now - this.lastRender;
+        const dt = (now - this.lastRender) / 1000;
         this.lastRender = now;
-        const fraction = (now - this.lastUpdate) / this.updateDelay;
         try {
+            this.remeshPerf.begin();
+            this.remesh(dt);
+            this.remeshPerf.end();
             this.renderPerf.begin();
-            this.render(dt, fraction);
+            this.render(dt);
             this.renderPerf.end();
         }
         catch (e) {
-            this.render = () => { };
-            console.error(e);
+            this.onError(e);
         }
     }
     updateHandler() {
@@ -253,12 +300,11 @@ class Timing {
         while (this.lastUpdate + delay < now) {
             try {
                 this.updatePerf.begin();
-                this.update(delay);
+                this.update(delay / 1000);
                 this.updatePerf.end();
             }
             catch (e) {
-                this.update = () => { };
-                console.error(e);
+                this.onError(e);
             }
             this.lastUpdate += delay;
             now = this.now.now();
@@ -268,890 +314,58 @@ class Timing {
             }
         }
     }
-}
-;
-class Column {
-    constructor() {
-        this.last = 0;
-        this.size = 0;
-        this.reference_size = 0;
-        this.decorations = [];
-        this.data = new Int16Array(2 * kWorldHeight);
-        this.mismatches = new Int16Array(kWorldHeight);
-        this.reference_data = new Int16Array(2 * kWorldHeight);
-    }
-    clear() {
-        this.decorations.length = 0;
-        this.last = 0;
-        this.size = 0;
-    }
-    fillChunk(x, z, chunk, first) {
-        let last = 0;
-        for (let i = 0; i < this.size; i++) {
-            const offset = 2 * i;
-            const block = this.data[offset + 0];
-            const level = this.data[offset + 1];
-            chunk.setColumn(x, z, last, level - last, block);
-            last = level;
-        }
-        for (let i = 0; i < this.decorations.length; i += 2) {
-            const block = this.decorations[i + 0];
-            const level = this.decorations[i + 1];
-            chunk.setColumn(x, z, level, 1, block);
-        }
-        this.detectEquiLevelChanges(first);
-    }
-    fillEquilevels(equilevels) {
-        let current = 0;
-        const mismatches = this.mismatches;
-        for (let i = 0; i < kWorldHeight; i++) {
-            current += mismatches[i];
-            equilevels[i] = (current === 0 ? 1 : 0);
-        }
-    }
-    overwrite(block, y) {
-        if (!(0 <= y && y < kWorldHeight))
-            return;
-        this.decorations.push(block);
-        this.decorations.push(y);
-    }
-    push(block, height) {
-        height = Math.min(height, kWorldHeight);
-        if (height <= this.last)
-            return;
-        this.last = height;
-        const offset = 2 * this.size;
-        this.data[offset + 0] = block;
-        this.data[offset + 1] = this.last;
-        this.size++;
-    }
-    getNthBlock(n, bedrock) {
-        return n < 0 ? bedrock : this.data[2 * n + 0];
-    }
-    getNthLevel(n) {
-        return n < 0 ? 0 : this.data[2 * n + 1];
-    }
-    getSize() {
-        return this.size;
-    }
-    detectEquiLevelChanges(first) {
-        if (this.last < kWorldHeight) {
-            const offset = 2 * this.size;
-            this.data[offset + 0] = kEmptyBlock;
-            this.data[offset + 1] = kWorldHeight;
-            this.size++;
-        }
-        if (first)
-            this.mismatches.fill(0);
-        for (let i = 0; i < this.decorations.length; i += 2) {
-            const level = this.decorations[i + 1];
-            this.mismatches[level]++;
-            if (level + 1 < kWorldHeight)
-                this.mismatches[level + 1]--;
-        }
-        if (first) {
-            for (let i = 0; i < 2 * this.size; i++) {
-                this.reference_data[i] = this.data[i];
-            }
-            this.reference_size = this.size;
-            return;
-        }
-        let matched = true;
-        let di = 0, ri = 0;
-        let d_start = 0, r_start = 0;
-        while (di < this.size && ri < this.reference_size) {
-            const d_offset = 2 * di;
-            const d_block = this.data[d_offset + 0];
-            const d_limit = this.data[d_offset + 1];
-            const r_offset = 2 * ri;
-            const r_block = this.reference_data[r_offset + 0];
-            const r_limit = this.reference_data[r_offset + 1];
-            if (matched !== (d_block === r_block)) {
-                const height = Math.max(d_start, r_start);
-                this.mismatches[height] += matched ? 1 : -1;
-                matched = !matched;
-            }
-            if (d_limit <= r_limit) {
-                d_start = d_limit;
-                di++;
-            }
-            if (r_limit <= d_limit) {
-                r_start = r_limit;
-                ri++;
-            }
-        }
-        assert(di === this.size);
-        assert(ri === this.reference_size);
-        assert(d_start === kWorldHeight);
-        assert(r_start === kWorldHeight);
-    }
-}
-;
-;
-class Circle {
-    constructor(radius) {
-        this.center_x = 0;
-        this.center_z = 0;
-        const bound = radius * radius;
-        const floor = Math.floor(radius);
-        const points = [];
-        for (let i = -floor; i <= floor; i++) {
-            for (let j = -floor; j <= floor; j++) {
-                const distance = i * i + j * j;
-                if (distance > bound)
-                    continue;
-                points.push({ i, j, distance });
-            }
-        }
-        points.sort((a, b) => a.distance - b.distance);
-        let current = 0;
-        this.deltas = new Int32Array(floor + 1);
-        this.points = new Int32Array(2 * points.length);
-        for (const { i, j } of points) {
-            this.points[current++] = i;
-            this.points[current++] = j;
-            const ai = Math.abs(i), aj = Math.abs(j);
-            this.deltas[ai] = Math.max(this.deltas[ai], aj);
-        }
-        assert(current === this.points.length);
-        let shift = 0;
-        while ((1 << shift) < 2 * floor + 1)
-            shift++;
-        this.elements = new Array(1 << (2 * shift)).fill(null);
-        this.shift = shift;
-        this.mask = (1 << shift) - 1;
-    }
-    center(center_x, center_z) {
-        this.each((cx, cz) => {
-            const ax = Math.abs(cx - center_x);
-            const az = Math.abs(cz - center_z);
-            if (az <= this.deltas[ax])
-                return false;
-            const index = this.index(cx, cz);
-            const value = this.elements[index];
-            if (value === null)
-                return false;
-            value.dispose();
-            this.elements[index] = null;
-            return false;
-        });
-        this.center_x = center_x;
-        this.center_z = center_z;
-    }
-    each(fn) {
-        const { center_x, center_z, points } = this;
-        const length = points.length;
-        for (let i = 0; i < length; i += 2) {
-            const done = fn(points[i] + center_x, points[i + 1] + center_z);
-            if (done)
-                break;
-        }
-    }
-    get(cx, cz) {
-        const value = this.elements[this.index(cx, cz)];
-        return value && value.cx === cx && value.cz === cz ? value : null;
-    }
-    set(cx, cz, value) {
-        const index = this.index(cx, cz);
-        assert(this.elements[index] === null);
-        this.elements[index] = value;
-    }
-    index(cx, cz) {
-        const { mask, shift } = this;
-        return ((cz & mask) << shift) | (cx & mask);
+    onError(e) {
+        this.remesh = this.render = this.update = () => { };
+        console.error(e);
     }
 }
 ;
 //////////////////////////////////////////////////////////////////////////////
-const kChunkBits = 4;
-const kChunkWidth = 1 << kChunkBits;
-const kChunkMask = kChunkWidth - 1;
-const kWorldHeight = 256;
-const kChunkRadius = 12;
-const kNumChunksToLoadPerFrame = 1;
-const kNumChunksToMeshPerFrame = 1;
-const kNumLODChunksToMeshPerFrame = 1;
-const kFrontierLOD = 2;
-const kFrontierRadius = 8;
-const kFrontierLevels = 6;
-// Enable debug assertions for the equi-levels optimization.
-const kCheckEquilevels = false;
-const kNeighborOffsets = (() => {
-    const W = kChunkWidth;
-    const H = kWorldHeight;
-    const L = W - 1;
-    const N = W + 1;
-    return [
-        [[0, 0, 0], [1, 1, 1], [0, 0, 0], [W, H, W]],
-        [[-1, 0, 0], [0, 1, 1], [L, 0, 0], [1, H, W]],
-        [[1, 0, 0], [N, 1, 1], [0, 0, 0], [1, H, W]],
-        [[0, 0, -1], [1, 1, 0], [0, 0, L], [W, H, 1]],
-        [[0, 0, 1], [1, 1, N], [0, 0, 0], [W, H, 1]],
-    ];
-})();
-class Chunk {
-    constructor(cx, cz, world, loader) {
-        this.dirty = false;
-        this.ready = false;
-        this.neighbors = 0;
-        this.solid = null;
-        this.water = null;
-        this.cx = cx;
-        this.cz = cz;
-        this.world = world;
-        this.voxels = new Tensor3(kChunkWidth, kWorldHeight, kChunkWidth);
-        this.heightmap = new Tensor2(kChunkWidth, kChunkWidth);
-        this.light_map = new Tensor2(kChunkWidth, kChunkWidth);
-        this.equilevels = new Int16Array(kWorldHeight);
-        this.load(loader);
-    }
-    dispose() {
-        this.dropMeshes();
-        const { cx, cz } = this;
-        const neighbor = (x, z) => {
-            const chunk = this.world.chunks.get(x + cx, z + cz);
-            if (chunk)
-                chunk.notifyNeighborDisposed();
-        };
-        neighbor(1, 0);
-        neighbor(-1, 0);
-        neighbor(0, 1);
-        neighbor(0, -1);
-    }
-    getBlock(x, y, z) {
-        const xm = x & kChunkMask, zm = z & kChunkMask;
-        return this.voxels.get(xm, y, zm);
-    }
-    getLitHeight(x, z) {
-        const xm = x & kChunkMask, zm = z & kChunkMask;
-        return this.light_map.get(xm, zm);
-    }
-    setBlock(x, y, z, block) {
-        const voxels = this.voxels;
-        const xm = x & kChunkMask, zm = z & kChunkMask;
-        const old = voxels.get(xm, y, zm);
-        if (old === block)
-            return;
-        const index = voxels.index(xm, y, zm);
-        voxels.data[index] = block;
-        this.dirty = true;
-        this.updateHeightmap(xm, zm, index, y, 1, block);
-        this.equilevels[y] = 0;
-        const neighbor = (x, y, z) => {
-            const { cx, cz } = this;
-            const chunk = this.world.chunks.get(x + cx, z + cz);
-            if (chunk)
-                chunk.dirty = true;
-        };
-        if (xm === 0)
-            neighbor(-1, 0, 0);
-        if (xm === kChunkMask)
-            neighbor(1, 0, 0);
-        if (zm === 0)
-            neighbor(0, 0, -1);
-        if (zm === kChunkMask)
-            neighbor(0, 0, 1);
-    }
-    setColumn(x, z, start, count, block) {
-        const voxels = this.voxels;
-        const xm = x & kChunkMask, zm = z & kChunkMask;
-        assert(voxels.stride[1] === 1);
-        const index = voxels.index(xm, start, zm);
-        voxels.data.fill(block, index, index + count);
-        this.updateHeightmap(xm, zm, index, start, count, block);
-    }
-    hasMesh() {
-        return !!(this.solid || this.water);
-    }
-    needsRemesh() {
-        return this.dirty && this.ready;
-    }
-    remeshChunk() {
-        assert(this.dirty);
-        this.remeshTerrain();
-        this.dirty = false;
-    }
-    load(loader) {
-        const { cx, cz, world } = this;
-        const column = world.column;
-        const dx = cx << kChunkBits;
-        const dz = cz << kChunkBits;
-        for (let x = 0; x < kChunkWidth; x++) {
-            for (let z = 0; z < kChunkWidth; z++) {
-                const first = x + z === 0;
-                loader(x + dx, z + dz, column);
-                column.fillChunk(x + dx, z + dz, this, first);
-                column.clear();
-            }
-        }
-        column.fillEquilevels(this.equilevels);
-        if (kCheckEquilevels) {
-            for (let y = 0; y < kWorldHeight; y++) {
-                if (this.equilevels[y] === 0)
-                    continue;
-                const base = this.voxels.get(0, y, 0);
-                for (let x = 0; x < kChunkWidth; x++) {
-                    for (let z = 0; z < kChunkWidth; z++) {
-                        assert(this.voxels.get(x, y, z) === base);
-                    }
-                }
-            }
-        }
-        const neighbor = (x, z) => {
-            const chunk = this.world.chunks.get(x + cx, z + cz);
-            if (!chunk)
-                return;
-            chunk.notifyNeighborLoaded();
-            this.neighbors++;
-        };
-        neighbor(1, 0);
-        neighbor(-1, 0);
-        neighbor(0, 1);
-        neighbor(0, -1);
-        this.dirty = true;
-        this.ready = this.checkReady();
-    }
-    checkReady() {
-        return this.neighbors === 4;
-    }
-    dropMeshes() {
-        if (this.solid)
-            this.solid.dispose();
-        if (this.water)
-            this.water.dispose();
-        this.solid = null;
-        this.water = null;
-        this.dirty = true;
-    }
-    notifyNeighborDisposed() {
-        assert(this.neighbors > 0);
-        this.neighbors--;
-        const old = this.ready;
-        this.ready = this.checkReady();
-        if (old && !this.ready)
-            this.dropMeshes();
-    }
-    notifyNeighborLoaded() {
-        assert(this.neighbors < 4);
-        this.neighbors++;
-        this.ready = this.checkReady();
-    }
-    remeshTerrain() {
-        const { cx, cz, world } = this;
-        const { bedrock, buffer, heightmap, light_map, equilevels } = world;
-        equilevels.set(this.equilevels, 1);
-        for (const offset of kNeighborOffsets) {
-            const [c, dstPos, srcPos, size] = offset;
-            const chunk = world.chunks.get(cx + c[0], cz + c[2]);
-            const delta = dstPos[1] - srcPos[1];
-            assert(delta === 1);
-            if (chunk) {
-                this.copyHeightmap(heightmap, dstPos, chunk.heightmap, srcPos, size);
-                this.copyHeightmap(light_map, dstPos, chunk.light_map, srcPos, size);
-                this.copyVoxels(buffer, dstPos, chunk.voxels, srcPos, size);
-            }
-            else {
-                this.zeroHeightmap(heightmap, dstPos, size, delta);
-                this.zeroHeightmap(light_map, dstPos, size, delta);
-                this.zeroVoxels(buffer, dstPos, size);
-            }
-            if (chunk !== this) {
-                this.copyEquilevels(equilevels, chunk, srcPos, size, delta);
-            }
-        }
-        if (kCheckEquilevels) {
-            for (let y = 0; y < buffer.shape[1]; y++) {
-                if (equilevels[y] === 0)
-                    continue;
-                const base = buffer.get(1, y, 1);
-                for (let x = 0; x < buffer.shape[0]; x++) {
-                    for (let z = 0; z < buffer.shape[2]; z++) {
-                        if ((x !== 0 && x !== buffer.shape[0] - 1) ||
-                            (z !== 0 && z !== buffer.shape[2] - 1)) {
-                            assert(buffer.get(x, y, z) === base);
-                        }
-                    }
-                }
-            }
-        }
-        const x = cx << kChunkBits, z = cz << kChunkBits;
-        const meshed = world.mesher.meshChunk(buffer, heightmap, light_map, equilevels, this.solid, this.water);
-        const [solid, water] = meshed;
-        if (solid)
-            solid.setPosition(x, 0, z);
-        if (water)
-            water.setPosition(x, 0, z);
-        this.solid = solid;
-        this.water = water;
-    }
-    updateHeightmap(xm, zm, index, start, count, block) {
-        const end = start + count;
-        const offset = this.heightmap.index(xm, zm);
-        const height = this.heightmap.data[offset];
-        const light_ = this.light_map.data[offset];
-        const voxels = this.voxels;
-        assert(voxels.stride[1] === 1);
-        if (block === kEmptyBlock && start < height && height <= end) {
-            let i = 0;
-            for (; i < start; i++) {
-                if (voxels.data[index - i - 1] !== kEmptyBlock)
-                    break;
-            }
-            this.heightmap.data[offset] = start - i;
-        }
-        else if (block !== kEmptyBlock && height <= end) {
-            this.heightmap.data[offset] = end;
-        }
-        const solid = this.world.registry.solid;
-        if (!solid[block] && start < light_ && light_ <= end) {
-            let i = 0;
-            for (; i < start; i++) {
-                if (solid[voxels.data[index - i - 1]])
-                    break;
-            }
-            this.light_map.data[offset] = start - i;
-        }
-        else if (solid[block] && light_ <= end) {
-            this.light_map.data[offset] = end;
-        }
-    }
-    copyEquilevels(dst, chunk, srcPos, size, delta) {
-        assert(this.voxels.stride[1] === 1);
-        const data = this.voxels.data;
-        if (chunk === null) {
-            for (let i = 0; i < kWorldHeight; i++) {
-                if (dst[i + delta] === 0)
-                    continue;
-                if (data[i] !== kEmptyBlock)
-                    dst[i + delta] = 0;
-            }
-            return;
-        }
-        assert(chunk.voxels.stride[1] === 1);
-        assert(size[0] === 1 || size[2] === 1);
-        const stride = chunk.voxels.stride[size[0] === 1 ? 2 : 0];
-        const index = chunk.voxels.index(srcPos[0], srcPos[1], srcPos[2]);
-        const limit = stride * (size[0] === 1 ? size[2] : size[0]);
-        const chunk_equilevels = chunk.equilevels;
-        const chunk_data = chunk.voxels.data;
-        for (let i = 0; i < kWorldHeight; i++) {
-            if (dst[i + delta] === 0)
-                continue;
-            const base = data[i];
-            if (chunk_equilevels[i] === 1 && chunk_data[i] === base)
-                continue;
-            for (let offset = 0; offset < limit; offset += stride) {
-                if (chunk_data[index + offset + i] === base)
-                    continue;
-                dst[i + delta] = 0;
-                break;
-            }
-        }
-    }
-    copyHeightmap(dst, dstPos, src, srcPos, size) {
-        const ni = size[0], nk = size[2];
-        const di = dstPos[0], dk = dstPos[2];
-        const si = srcPos[0], sk = srcPos[2];
-        const offset = dstPos[1] - srcPos[1];
-        for (let i = 0; i < ni; i++) {
-            for (let k = 0; k < nk; k++) {
-                const sindex = src.index(si + i, sk + k);
-                const dindex = dst.index(di + i, dk + k);
-                dst.data[dindex] = src.data[sindex] + offset;
-            }
-        }
-    }
-    copyVoxels(dst, dstPos, src, srcPos, size) {
-        const [ni, nj, nk] = size;
-        const [di, dj, dk] = dstPos;
-        const [si, sj, sk] = srcPos;
-        assert(dst.stride[1] === 1);
-        assert(src.stride[1] === 1);
-        for (let i = 0; i < ni; i++) {
-            for (let k = 0; k < nk; k++) {
-                const sindex = src.index(si + i, sj, sk + k);
-                const dindex = dst.index(di + i, dj, dk + k);
-                dst.data.set(src.data.subarray(sindex, sindex + nj), dindex);
-            }
-        }
-    }
-    zeroHeightmap(dst, dstPos, size, delta) {
-        const ni = size[0], nk = size[2];
-        const di = dstPos[0], dk = dstPos[2];
-        for (let i = 0; i < ni; i++) {
-            for (let k = 0; k < nk; k++) {
-                dst.set(di + i, dk + k, delta);
-            }
-        }
-    }
-    zeroVoxels(dst, dstPos, size) {
-        const [ni, nj, nk] = size;
-        const [di, dj, dk] = dstPos;
-        const dsj = dst.stride[1];
-        for (let i = 0; i < ni; i++) {
-            for (let k = 0; k < nk; k++) {
-                // Unroll along the y-axis, since it's the longest chunk dimension.
-                let dindex = dst.index(di + i, dj, dk + k);
-                for (let j = 0; j < nj; j++, dindex += dsj) {
-                    dst.data[dindex] = kEmptyBlock;
-                }
-            }
-        }
-    }
-}
-;
-//////////////////////////////////////////////////////////////////////////////
-const kMultiMeshBits = 2;
-const kMultiMeshSide = 1 << kMultiMeshBits;
-const kMultiMeshArea = kMultiMeshSide * kMultiMeshSide;
-const kLODSingleMask = (1 << 4) - 1;
-class LODMultiMesh {
-    constructor() {
-        this.visible = 0;
-        this.solid = null;
-        this.water = null;
-        this.meshed = new Array(kMultiMeshArea).fill(false);
-        this.enabled = new Array(kMultiMeshArea).fill(false);
-        this.mask = new Int32Array(2);
-        this.mask[0] = this.mask[1] = -1;
-    }
-    disable(index) {
-        if (!this.enabled[index])
-            return;
-        this.setMask(index, kLODSingleMask);
-        this.enabled[index] = false;
-        if (this.enabled.some(x => x))
-            return;
-        for (let i = 0; i < this.meshed.length; i++)
-            this.meshed[i] = false;
-        if (this.solid)
-            this.solid.dispose();
-        if (this.water)
-            this.water.dispose();
-        this.solid = null;
-        this.water = null;
-        this.mask[0] = this.mask[1] = -1;
-    }
-    index(chunk) {
-        const mask = kMultiMeshSide - 1;
-        return ((chunk.cz & mask) << kMultiMeshBits) | (chunk.cx & mask);
-    }
-    show(index, mask) {
-        assert(this.meshed[index]);
-        this.setMask(index, mask);
-        this.enabled[index] = true;
-    }
-    setMask(index, mask) {
-        const mask_index = index >> 3;
-        const mask_shift = (index & 7) * 4;
-        this.mask[mask_index] &= ~(kLODSingleMask << mask_shift);
-        this.mask[mask_index] |= mask << mask_shift;
-        const shown = (this.mask[0] & this.mask[1]) !== -1;
-        if (this.solid)
-            this.solid.show(this.mask, shown);
-        if (this.water)
-            this.water.show(this.mask, shown);
-    }
-}
-;
-class FrontierChunk {
-    constructor(cx, cz, level, mesh) {
-        this.cx = cx;
-        this.cz = cz;
-        this.level = level;
-        this.mesh = mesh;
-    }
-    dispose() {
-        const mesh = this.mesh;
-        mesh.disable(mesh.index(this));
-    }
-    hasMesh() {
-        const mesh = this.mesh;
-        return mesh.meshed[mesh.index(this)];
-    }
-}
-;
-class Frontier {
-    constructor(world) {
-        this.world = world;
-        this.meshes = new Map();
-        this.levels = [];
-        let radius = (kChunkRadius | 0) + 0.5;
-        for (let i = 0; i < kFrontierLevels; i++) {
-            radius = (radius + kFrontierRadius) / 2;
-            this.levels.push(new Circle(radius));
-        }
-        assert(kChunkWidth % kFrontierLOD === 0);
-        const side = kChunkWidth / kFrontierLOD;
-        const size = 2 * (side + 2) * (side + 2);
-        this.solid_heightmap = new Uint32Array(size);
-        this.water_heightmap = new Uint32Array(size);
-        this.side = side;
-    }
-    center(cx, cz) {
-        for (const level of this.levels) {
-            cx >>= 1;
-            cz >>= 1;
-            level.center(cx, cz);
-        }
-    }
-    remeshFrontier() {
-        for (let i = 0; i < kFrontierLevels; i++) {
-            this.computeLODAtLevel(i);
-        }
-    }
-    computeLODAtLevel(l) {
-        const world = this.world;
-        const level = this.levels[l];
-        const meshed = (dx, dz) => {
-            if (l > 0) {
-                const chunk = this.levels[l - 1].get(dx, dz);
-                return chunk !== null && chunk.hasMesh();
-            }
-            else {
-                const chunk = world.chunks.get(dx, dz);
-                return chunk !== null && chunk.hasMesh();
-            }
-        };
-        let counter = 0;
-        level.each((cx, cz) => {
-            let mask = 0;
-            for (let i = 0; i < 4; i++) {
-                const dx = (cx << 1) + (i & 1 ? 1 : 0);
-                const dz = (cz << 1) + (i & 2 ? 1 : 0);
-                if (meshed(dx, dz))
-                    mask |= (1 << i);
-            }
-            const shown = mask !== 15;
-            const extra = counter < kNumLODChunksToMeshPerFrame;
-            const create = shown && (extra || mask !== 0);
-            const existing = level.get(cx, cz);
-            if (!existing && !create)
-                return false;
-            const lod = (() => {
-                if (existing)
-                    return existing;
-                const created = this.createFrontierChunk(cx, cz, l);
-                level.set(cx, cz, created);
-                return created;
-            })();
-            if (shown && !lod.hasMesh()) {
-                this.createLODMeshes(lod);
-                counter++;
-            }
-            lod.mesh.show(lod.mesh.index(lod), mask);
-            return false;
-        });
-    }
-    createLODMeshes(chunk) {
-        const { side, world } = this;
-        const { cx, cz, level, mesh } = chunk;
-        const { bedrock, column, loadFrontier, registry } = world;
-        const { solid_heightmap, water_heightmap } = this;
-        if (!loadFrontier)
-            return;
-        assert(kFrontierLOD % 2 === 0);
-        assert(registry.solid[bedrock]);
-        const lshift = kChunkBits + level;
-        const lod = kFrontierLOD << level;
-        const x = (2 * cx + 1) << lshift;
-        const z = (2 * cz + 1) << lshift;
-        // The (x, z) position of the center of the multimesh for this mesh.
-        const multi = kMultiMeshSide;
-        const mx = (2 * (cx & ~(multi - 1)) + multi) << lshift;
-        const mz = (2 * (cz & ~(multi - 1)) + multi) << lshift;
-        for (let k = 0; k < 4; k++) {
-            const dx = (k & 1 ? 0 : -1 << lshift);
-            const dz = (k & 2 ? 0 : -1 << lshift);
-            const ax = x + dx + lod / 2;
-            const az = z + dz + lod / 2;
-            for (let i = 0; i < side; i++) {
-                for (let j = 0; j < side; j++) {
-                    loadFrontier(ax + i * lod, az + j * lod, column);
-                    const offset = 2 * ((i + 1) + (j + 1) * (side + 2));
-                    const size = column.getSize();
-                    const last_block = column.getNthBlock(size - 1, bedrock);
-                    const last_level = column.getNthLevel(size - 1);
-                    if (registry.solid[last_block]) {
-                        solid_heightmap[offset + 0] = last_block;
-                        solid_heightmap[offset + 1] = last_level;
-                        water_heightmap[offset + 0] = 0;
-                        water_heightmap[offset + 1] = 0;
-                    }
-                    else {
-                        water_heightmap[offset + 0] = last_block;
-                        water_heightmap[offset + 1] = last_level;
-                        for (let i = size; i > 0; i--) {
-                            const block = column.getNthBlock(i - 2, bedrock);
-                            const level = column.getNthLevel(i - 2);
-                            if (!registry.solid[block])
-                                continue;
-                            solid_heightmap[offset + 0] = block;
-                            solid_heightmap[offset + 1] = level;
-                            break;
-                        }
-                    }
-                    column.clear();
-                }
-            }
-            const n = side + 2;
-            const px = x + dx - mx - lod;
-            const pz = z + dz - mz - lod;
-            const mask = k + 4 * mesh.index(chunk);
-            mesh.solid = this.world.mesher.meshFrontier(solid_heightmap, mask, px, pz, n, n, lod, mesh.solid, true);
-            mesh.water = this.world.mesher.meshFrontier(water_heightmap, mask, px, pz, n, n, lod, mesh.water, false);
-        }
-        if (mesh.solid)
-            mesh.solid.setPosition(mx, 0, mz);
-        if (mesh.water)
-            mesh.water.setPosition(mx, 0, mz);
-        mesh.meshed[mesh.index(chunk)] = true;
-    }
-    createFrontierChunk(cx, cz, level) {
-        const bits = kMultiMeshBits;
-        const mesh = this.getOrCreateMultiMesh(cx >> bits, cz >> bits, level);
-        return new FrontierChunk(cx, cz, level, mesh);
-    }
-    getOrCreateMultiMesh(cx, cz, level) {
-        const shift = 12;
-        const mask = (1 << shift) - 1;
-        const base = ((cz & mask) << shift) | (cx & mask);
-        const key = base * kFrontierLevels + level;
-        const result = this.meshes.get(key);
-        if (result)
-            return result;
-        const created = new LODMultiMesh();
-        this.meshes.set(key, created);
-        return created;
-    }
-}
-;
-//////////////////////////////////////////////////////////////////////////////
-class World {
-    constructor(registry, renderer) {
-        const radius = (kChunkRadius | 0) + 0.5;
-        this.chunks = new Circle(radius);
-        this.column = new Column();
-        this.renderer = renderer;
-        this.registry = registry;
-        this.frontier = new Frontier(this);
-        this.mesher = new TerrainMesher(registry, renderer);
-        this.loadChunk = null;
-        this.loadFrontier = null;
-        this.bedrock = kEmptyBlock;
-        // Add a one-block-wide plane of extra space on each side of our voxels,
-        // so that we can include adjacent chunks and use their contents for AO.
-        //
-        // We add a two-block-wide plane below our voxel data, so that we also
-        // have room for a plane of bedrock blocks below this chunk (in case we
-        // dig all the way to y = 0).
-        const w = kChunkWidth + 2;
-        const h = kWorldHeight + 2;
-        this.buffer = new Tensor3(w, h, w);
-        this.heightmap = new Tensor2(w, w);
-        this.light_map = new Tensor2(w, w);
-        this.equilevels = new Int16Array(h);
-        this.equilevels[0] = this.equilevels[h - 1] = 1;
-    }
-    isBlockLit(x, y, z) {
-        const cx = x >> kChunkBits, cz = z >> kChunkBits;
-        const chunk = this.chunks.get(cx, cz);
-        return chunk ? y >= chunk.getLitHeight(x, z) : true;
-    }
-    getBlock(x, y, z) {
-        if (y < 0)
-            return this.bedrock;
-        if (y >= kWorldHeight)
-            return kEmptyBlock;
-        const cx = x >> kChunkBits, cz = z >> kChunkBits;
-        const chunk = this.chunks.get(cx, cz);
-        return chunk ? chunk.getBlock(x, y, z) : kUnknownBlock;
-    }
-    setBlock(x, y, z, block) {
-        if (!(0 <= y && y < kWorldHeight))
-            return;
-        const cx = x >> kChunkBits, cz = z >> kChunkBits;
-        const chunk = this.chunks.get(cx, cz);
-        if (chunk)
-            chunk.setBlock(x, y, z, block);
-    }
-    setLoader(bedrock, loadChunk, loadFrontier) {
-        this.bedrock = bedrock;
-        this.loadChunk = loadChunk;
-        this.loadFrontier = loadFrontier || loadChunk;
-        const buffer = this.buffer;
-        for (let x = 0; x < buffer.shape[0]; x++) {
-            for (let z = 0; z < buffer.shape[2]; z++) {
-                buffer.set(x, 0, z, bedrock);
-            }
-        }
-    }
-    recenter(x, y, z) {
-        const { chunks, frontier, loadChunk } = this;
-        const cx = Math.floor(x) >> kChunkBits;
-        const cz = Math.floor(z) >> kChunkBits;
-        chunks.center(cx, cz);
-        frontier.center(cx, cz);
-        if (!loadChunk)
-            return;
-        let loaded = 0;
-        chunks.each((cx, cz) => {
-            const existing = chunks.get(cx, cz);
-            if (existing)
-                return false;
-            const chunk = new Chunk(cx, cz, this, loadChunk);
-            chunks.set(cx, cz, chunk);
-            return (++loaded) === kNumChunksToLoadPerFrame;
-        });
-    }
-    remesh() {
-        const { chunks, frontier } = this;
-        let meshed = 0, total = 0;
-        chunks.each((cx, cz) => {
-            total++;
-            if (total > 9 && meshed >= kNumChunksToMeshPerFrame)
-                return true;
-            const chunk = chunks.get(cx, cz);
-            if (!chunk || !chunk.needsRemesh())
-                return false;
-            chunk.remeshChunk();
-            meshed++;
-            return false;
-        });
-        frontier.remeshFrontier();
-    }
-    distance(cx, cz, x, z) {
-        const half = kChunkWidth / 2;
-        const dx = (cx << kChunkBits) + half - x;
-        const dy = (cz << kChunkBits) + half - z;
-        return dx * dx + dy * dy;
-    }
-}
-;
-//////////////////////////////////////////////////////////////////////////////
+const kTmpPos = Vec3.create();
 const kTmpMin = Vec3.create();
 const kTmpMax = Vec3.create();
 const kTmpDelta = Vec3.create();
 const kTmpImpacts = Vec3.create();
 const kMinZLowerBound = 0.001;
 const kMinZUpperBound = 0.1;
+const kChunkWidth = 16;
+const kWorldHeight = 256;
+const kChunkRadius = 12;
+const kFrontierRadius = 8;
+const kFrontierLevels = 6;
+const kSunlightLevel = 0xf;
+const lighting = (x) => Math.pow(0.8, kSunlightLevel - x);
 class Env {
     constructor(id) {
-        this.cameraAlpha = 0;
-        this.cameraBlock = kEmptyBlock;
-        this.cameraColor = kWhite;
         this.highlightSide = -1;
-        this.shouldMesh = true;
         this.frame = 0;
         this.container = new Container(id);
         this.entities = new EntityComponentSystem();
-        this.registry = new Registry();
         this.renderer = new Renderer(this.container.canvas);
-        this.world = new World(this.registry, this.renderer);
-        this.highlight = this.world.mesher.meshHighlight();
-        this.highlightMask = new Int32Array(2);
+        this.helper = nonnull(helper);
+        this.helper.renderer = this.renderer;
+        this.helper.initializeWorld(kChunkRadius, kFrontierRadius, kFrontierLevels);
+        this.registry = new Registry(this.helper, this.renderer);
+        this.highlight = this.renderer.addHighlightMesh();
         this.highlightPosition = Vec3.create();
-        this.timing = new Timing(this.render.bind(this), this.update.bind(this));
+        this.cameraColor = kWhite.slice();
+        this.cameraMaterial = kNoMaterial;
+        const remesh = this.remesh.bind(this);
+        const render = this.render.bind(this);
+        const update = this.update.bind(this);
+        this.timing = new Timing(remesh, render, update);
+    }
+    getBaseHeight(x, z) {
+        return this.helper.module.asm.getBaseHeight(x, z);
+    }
+    getBlock(x, y, z) {
+        return this.helper.getBlock(x, y, z);
+    }
+    getLight(x, y, z) {
+        return lighting(this.helper.getLightLevel(x, y, z));
+    }
+    getMutableInputs() {
+        return this.container.inputs;
     }
     getTargetedBlock() {
         return this.highlightSide < 0 ? null : this.highlightPosition;
@@ -1159,9 +373,19 @@ class Env {
     getTargetedBlockSide() {
         return this.highlightSide;
     }
+    setBlock(x, y, z, block) {
+        this.helper.setBlock(x, y, z, block);
+    }
     setCameraTarget(x, y, z) {
         this.renderer.camera.setTarget(x, y, z);
         this.setSafeZoomDistance();
+    }
+    setPointLight(x, y, z, level) {
+        this.helper.setPointLight(x, y, z, level);
+    }
+    recenter(x, y, z) {
+        const ix = int(Math.round(x)), iz = int(Math.round(z));
+        this.helper.recenterWorld(ix, iz);
     }
     refresh() {
         const saved = this.container.inputs.pointer;
@@ -1170,12 +394,16 @@ class Env {
         this.render(0);
         this.container.inputs.pointer = saved;
     }
+    remesh() {
+        this.helper.remeshWorld();
+    }
     render(dt) {
         if (!this.container.inputs.pointer)
             return;
-        this.frame += 1;
-        if (this.frame === 65536)
-            this.frame = 0;
+        const old_frame = this.frame;
+        this.frame = old_frame + 60 * dt;
+        if (this.frame > 0xffff)
+            this.frame -= 0xffff;
         const pos = this.frame / 256;
         const rad = 2 * Math.PI * pos;
         const move = 0.25 * (Math.cos(rad) * 0.5 + pos);
@@ -1187,12 +415,13 @@ class Env {
         this.entities.render(dt);
         this.updateHighlightMesh();
         this.updateOverlayColor(wave);
-        const renderer_stats = this.renderer.render(move, wave);
-        this.shouldMesh = true;
+        const sparkle = int(old_frame) !== int(this.frame);
+        const renderer_stats = this.renderer.render(move, wave, sparkle);
         const timing = this.timing;
-        if (timing.updatePerf.frame() % 10 !== 0)
+        if (timing.renderPerf.frame() % 20 !== 0)
             return;
         const stats = `Update: ${this.formatStat(timing.updatePerf)}\r\n` +
+            `Remesh: ${this.formatStat(timing.remeshPerf)}\r\n` +
             `Render: ${this.formatStat(timing.renderPerf)}\r\n` +
             renderer_stats;
         this.container.displayStats(stats);
@@ -1201,63 +430,91 @@ class Env {
         if (!this.container.inputs.pointer)
             return;
         this.entities.update(dt);
-        if (!this.shouldMesh)
-            return;
-        this.shouldMesh = false;
-        this.world.remesh();
     }
     formatStat(perf) {
         const format = (x) => (x / 1000).toFixed(2);
         return `${format(perf.mean())}ms / ${format(perf.max())}ms`;
     }
     getRenderBlock(x, y, z) {
-        const result = this.world.getBlock(x, y, z);
-        return result === kUnknownBlock ? kEmptyBlock : result;
+        const result = this.helper.getBlock(x, y, z);
+        if (result === kEmptyBlock || result === kUnknownBlock ||
+            this.registry.getBlockFaceMaterial(result, 3) === kNoMaterial) {
+            return kEmptyBlock;
+        }
+        return result;
     }
     setSafeZoomDistance() {
         const camera = this.renderer.camera;
         const { direction, target, zoom } = camera;
-        const check = (pos) => {
-            const block = this.world.getBlock(pos[0], pos[1], pos[2]);
-            return !this.registry.solid[block];
-        };
         const [x, y, z] = target;
-        const buffer = kMinZUpperBound;
-        Vec3.set(kTmpMin, x - buffer, y - buffer, z - buffer);
-        Vec3.set(kTmpMax, x + buffer, y + buffer, z + buffer);
-        Vec3.scale(kTmpDelta, direction, -zoom);
-        sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
-        Vec3.add(kTmpDelta, kTmpMin, kTmpMax);
-        Vec3.scale(kTmpDelta, kTmpDelta, 0.5);
-        Vec3.sub(kTmpDelta, kTmpDelta, target);
-        camera.setSafeZoomDistance(Vec3.length(kTmpDelta));
+        const check = (x, y, z) => {
+            const block = this.helper.getBlock(x, y, z);
+            return !this.registry.opaque[block];
+        };
+        const shift_target = (delta, bump) => {
+            const buffer = kMinZUpperBound;
+            Vec3.set(kTmpMin, x - buffer, y - buffer + bump, z - buffer);
+            Vec3.set(kTmpMax, x + buffer, y + buffer + bump, z + buffer);
+            sweep(kTmpMin, kTmpMax, kTmpDelta, kTmpImpacts, check, true);
+            Vec3.add(kTmpDelta, kTmpMin, kTmpMax);
+            Vec3.scale(kTmpDelta, kTmpDelta, 0.5);
+            Vec3.sub(kTmpDelta, kTmpDelta, target);
+            return Vec3.length(kTmpDelta);
+        };
+        const safe_zoom_at = (bump) => {
+            Vec3.scale(kTmpDelta, direction, -zoom);
+            return shift_target(kTmpDelta, bump);
+        };
+        const max_bump = () => {
+            Vec3.set(kTmpDelta, 0, 0.5, 0);
+            return shift_target(kTmpDelta, 0);
+        };
+        let limit = 1;
+        let best_bump = -1;
+        let best_zoom = -1;
+        const step_size = 1 / 64;
+        for (let i = 0; i < limit; i++) {
+            const bump_at = i * step_size;
+            const zoom_at = safe_zoom_at(bump_at) - bump_at;
+            if (zoom_at < best_zoom)
+                continue;
+            best_bump = bump_at;
+            best_zoom = zoom_at;
+            if (zoom_at > zoom - bump_at - step_size)
+                break;
+            if (i === 0)
+                limit = Math.floor(max_bump() / step_size);
+        }
+        camera.setSafeZoomDistance(best_bump, best_zoom);
     }
     updateHighlightMesh() {
         const camera = this.renderer.camera;
         const { direction, target, zoom } = camera;
         let move = false;
-        this.highlightMask[0] = (1 << 6) - 1;
-        const check = (pos) => {
-            const [x, y, z] = pos;
-            const block = this.world.getBlock(pos[0], pos[1], pos[2]);
+        this.highlight.mask = int((1 << 6) - 1);
+        this.highlightSide = -1;
+        const check = (x, y, z) => {
+            const block = this.helper.getBlock(x, y, z);
             if (!this.registry.solid[block])
                 return true;
             let mask = 0;
+            const pos = kTmpPos;
+            Vec3.set(pos, x, y, z);
             for (let d = 0; d < 3; d++) {
                 pos[d] += 1;
-                const b0 = this.world.getBlock(pos[0], pos[1], pos[2]);
-                if (this.registry.solid[b0])
+                const b0 = this.helper.getBlock(int(pos[0]), int(pos[1]), int(pos[2]));
+                if (this.registry.opaque[b0])
                     mask |= (1 << (2 * d + 0));
                 pos[d] -= 2;
-                const b1 = this.world.getBlock(pos[0], pos[1], pos[2]);
-                if (this.registry.solid[b1])
+                const b1 = this.helper.getBlock(int(pos[0]), int(pos[1]), int(pos[2]));
+                if (this.registry.opaque[b1])
                     mask |= (1 << (2 * d + 1));
                 pos[d] += 1;
             }
             move = pos[0] !== this.highlightPosition[0] ||
                 pos[1] !== this.highlightPosition[1] ||
                 pos[2] !== this.highlightPosition[2];
-            this.highlightMask[0] = mask;
+            this.highlight.mask = int(mask);
             Vec3.copy(this.highlightPosition, pos);
             return false;
         };
@@ -1273,65 +530,195 @@ class Env {
             const impact = kTmpImpacts[i];
             if (impact === 0)
                 continue;
-            this.highlightSide = 2 * i + (impact < 0 ? 0 : 1);
+            this.highlightSide = int(2 * i + (impact < 0 ? 0 : 1));
             break;
         }
         if (move) {
             const pos = this.highlightPosition;
             this.highlight.setPosition(pos[0], pos[1], pos[2]);
         }
-        this.highlight.show(this.highlightMask, true);
     }
     updateOverlayColor(wave) {
         const [x, y, z] = this.renderer.camera.position;
-        const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+        const xi = int(Math.floor(x));
+        const yi = int(Math.floor(y));
+        const zi = int(Math.floor(z));
         let boundary = 1;
         // We should only apply wave if the block above a liquid is an air block.
         const new_block = (() => {
             const below = this.getRenderBlock(xi, yi, zi);
             if (below === kEmptyBlock)
                 return below;
-            const above = this.getRenderBlock(xi, yi + 1, zi);
+            const above = this.getRenderBlock(xi, int(yi + 1), zi);
             if (above !== kEmptyBlock)
                 return below;
             const delta = y + wave - yi - 1;
             boundary = Math.abs(delta);
             return delta > 0 ? kEmptyBlock : below;
         })();
-        const old_block = this.cameraBlock;
-        this.cameraBlock = new_block;
+        const new_material = (() => {
+            if (new_block === kEmptyBlock)
+                return kNoMaterial;
+            return this.registry.getBlockFaceMaterial(new_block, 3);
+        })();
+        const old_material = this.cameraMaterial;
+        this.cameraMaterial = new_material;
         const max = kMinZUpperBound;
         const min = kMinZLowerBound;
         const minZ = Math.max(Math.min(boundary / 2, max), min);
         this.renderer.camera.setMinZ(minZ);
-        if (new_block === kEmptyBlock) {
-            const changed = new_block !== old_block;
+        if (new_material === kNoMaterial) {
+            const changed = new_material !== old_material;
             if (changed)
                 this.renderer.setOverlayColor(kWhite);
             return;
         }
-        if (new_block !== old_block) {
-            const material = this.registry.getBlockFaceMaterial(new_block, 3);
-            const color = this.registry.getMaterialData(material).color;
-            this.cameraColor = color.slice();
-            this.cameraAlpha = color[3];
-        }
-        const falloff = (() => {
-            const max = 2, step = 32;
-            const limit = max * step;
-            for (let i = 1; i < limit; i++) {
-                const other = this.world.getBlock(xi, yi + i, zi);
-                if (other !== new_block)
-                    return Math.pow(2, i / step);
-            }
-            return Math.pow(2, max);
-        })();
-        this.cameraColor[3] = 1 - (1 - this.cameraAlpha) / falloff;
-        this.renderer.setOverlayColor(this.cameraColor);
+        const color = this.registry.getMaterialData(new_material).texture.color;
+        const light = this.getLight(xi, yi, zi);
+        const saved = this.cameraColor;
+        saved[0] = color[0] * light;
+        saved[1] = color[1] * light;
+        saved[2] = color[2] * light;
+        saved[3] = color[3];
+        this.renderer.setOverlayColor(saved);
     }
 }
 ;
+;
+class WasmHandle {
+    constructor() {
+        this.entries = [];
+        this.freeList = [];
+    }
+    allocate(value) {
+        const free = this.freeList.pop();
+        if (free !== undefined) {
+            this.entries[free] = value;
+            return free;
+        }
+        const result = int(this.entries.length);
+        this.entries.push(value);
+        return result;
+    }
+    free(index) {
+        const value = nonnull(this.entries[index]);
+        this.entries[index] = null;
+        this.freeList.push(index);
+        return value;
+    }
+    get(index) {
+        return nonnull(this.entries[index]);
+    }
+}
+;
+class WasmHelper {
+    constructor(module) {
+        this.renderer = null;
+        this.module = module;
+        this.initializeWorld = module.asm.initializeWorld;
+        this.recenterWorld = module.asm.recenterWorld;
+        this.remeshWorld = module.asm.remeshWorld;
+        this.getBlock = module.asm.getBlock;
+        this.setBlock = module.asm.setBlock;
+        this.getLightLevel = module.asm.getLightLevel;
+        this.setPointLight = module.asm.setPointLight;
+        this.instances = new WasmHandle();
+        this.lights = new WasmHandle();
+        this.meshes = new WasmHandle();
+        this.block_to_instance = [];
+    }
+}
+;
+let loaded = false;
+let helper = null;
+let on_start_callbacks = [];
+const checkReady = () => {
+    if (!(loaded && helper))
+        return;
+    on_start_callbacks.forEach(x => x());
+};
+const js_AddLightTexture = (data, size) => {
+    const h = nonnull(helper);
+    const r = nonnull(h.renderer);
+    const buffer = h.module.HEAPU8.subarray(data, data + size);
+    return h.lights.allocate(r.addLightTexture(buffer));
+};
+const js_FreeLightTexture = (handle) => {
+    nonnull(helper).lights.free(handle).dispose();
+};
+const js_AddInstancedMesh = (block, x, y, z) => {
+    const h = nonnull(helper);
+    const instance = nonnull(h.block_to_instance[block]).addInstance();
+    instance.setPosition(x + 0.5, y, z + 0.5);
+    return h.instances.allocate(instance);
+};
+const js_FreeInstancedMesh = (handle) => {
+    nonnull(helper).instances.free(handle).dispose();
+};
+const js_SetInstancedMeshLight = (handle, level) => {
+    const h = nonnull(helper);
+    h.instances.get(handle).setLight(lighting(level));
+};
+const js_AddVoxelMesh = (data, size, phase) => {
+    const h = nonnull(helper);
+    const r = nonnull(h.renderer);
+    const offset = data >> 2;
+    const buffer = h.module.HEAP32.slice(offset, offset + size);
+    const geo = new Geometry(buffer, int(size / Geometry.StrideInInt32));
+    return h.meshes.allocate(r.addVoxelMesh(geo, phase));
+};
+const js_FreeVoxelMesh = (handle) => {
+    nonnull(helper).meshes.free(handle).dispose();
+};
+const js_AddVoxelMeshGeometry = (handle, data, size) => {
+    const h = nonnull(helper);
+    const mesh = h.meshes.get(handle);
+    const geo = mesh.getGeometry();
+    const old_num_quads = geo.num_quads;
+    const offset = data >> 2;
+    const buffer = h.module.HEAP32.subarray(offset, offset + size);
+    geo.allocateQuads(int(old_num_quads + (size / Geometry.StrideInInt32)));
+    geo.quads.set(buffer, old_num_quads * Geometry.StrideInInt32);
+    geo.dirty = true;
+    mesh.setGeometry(geo);
+};
+const js_SetVoxelMeshGeometry = (handle, data, size) => {
+    const h = nonnull(helper);
+    const offset = data >> 2;
+    const buffer = h.module.HEAP32.slice(offset, offset + size);
+    const geo = new Geometry(buffer, int(size / Geometry.StrideInInt32));
+    h.meshes.get(handle).setGeometry(geo);
+};
+const js_SetVoxelMeshLight = (handle, texture) => {
+    const h = nonnull(helper);
+    h.meshes.get(handle).setLight(h.lights.get(texture));
+};
+const js_SetVoxelMeshMask = (handle, m0, m1, shown) => {
+    const h = nonnull(helper);
+    h.meshes.get(handle).show(m0, m1, !!shown);
+};
+const js_SetVoxelMeshPosition = (handle, x, y, z) => {
+    nonnull(helper).meshes.get(handle).setPosition(x, y, z);
+};
+const init = (fn) => on_start_callbacks.push(fn);
+window.onload = () => { loaded = true; checkReady(); };
+window.beforeWasmCompile = (env) => {
+    env.js_AddLightTexture = js_AddLightTexture;
+    env.js_FreeLightTexture = js_FreeLightTexture;
+    env.js_AddInstancedMesh = js_AddInstancedMesh;
+    env.js_FreeInstancedMesh = js_FreeInstancedMesh;
+    env.js_SetInstancedMeshLight = js_SetInstancedMeshLight;
+    env.js_AddVoxelMesh = js_AddVoxelMesh;
+    env.js_FreeVoxelMesh = js_FreeVoxelMesh;
+    env.js_AddVoxelMeshGeometry = js_AddVoxelMeshGeometry;
+    env.js_SetVoxelMeshGeometry = js_SetVoxelMeshGeometry;
+    env.js_SetVoxelMeshLight = js_SetVoxelMeshLight;
+    env.js_SetVoxelMeshMask = js_SetVoxelMeshMask;
+    env.js_SetVoxelMeshPosition = js_SetVoxelMeshPosition;
+};
+window.onWasmCompile =
+    (m) => { helper = new WasmHelper(m); checkReady(); };
 //////////////////////////////////////////////////////////////////////////////
-export { Column, Env };
-export { kChunkWidth, kEmptyBlock, kWorldHeight };
+export { Env, init };
+export { kChunkWidth, kEmptyBlock, kNoMaterial, kWorldHeight };
 //# sourceMappingURL=engine.js.map
