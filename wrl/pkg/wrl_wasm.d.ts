@@ -1,10 +1,7 @@
 /* tslint:disable */
 /* eslint-disable */
-/**
- * @param {number} ch
- * @param {boolean} shift
- */
 export function keydown(ch: number, shift: boolean): void;
+export function size(): Int32Array;
 export function tick(): void;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -12,10 +9,12 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
   readonly keydown: (a: number, b: number) => void;
+  readonly size: () => [number, number];
   readonly tick: () => void;
-  readonly __wbindgen_export_0: WebAssembly.Table;
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
+  readonly __wbindgen_export_2: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
   readonly __wbindgen_start: () => void;
 }
 
