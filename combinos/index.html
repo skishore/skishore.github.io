@@ -1,0 +1,66 @@
+<html>
+  <head>
+    <!-- External library imports. -->
+    <script type="text/javascript" src="external/jquery/1.11.1/jquery.min.js"></script>
+    <script type="text/javascript" src="external/jquery-cookie/1.4.1/jquery.cookie.js"></script>
+    <link rel="stylesheet" href="external/bootstrap/3.1.1/bootstrap.min.css">
+    <script type="text/javascript" src="external/bootstrap/3.1.1/bootstrap.min.js"></script>
+    <script type="text/javascript" src="external/move/0.3.3/move.min.js"></script>
+    <script type="text/javascript" src="external/protovis/3.3.1/protovis.min.js"></script>
+    <script type="text/javascript" src="external/underscore/1.6.0/underscore.min.js"></script>
+
+    <!-- Base CSS and Javascript. -->
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <script type="text/javascript" src="util.js"></script>
+
+    <!-- Configuration classes. -->
+    <script type="text/javascript" src="Action.js"></script>
+    <script type="text/javascript" src="Key.js"></script>
+    <script type="text/javascript" src="LocalOptions.js"></script>
+
+    <!-- Block and its dependencies. -->
+    <script type="text/javascript" src="Color.js"></script>
+    <script type="text/javascript" src="Constants.js"></script>
+    <script type="text/javascript" src="Point.js"></script>
+    <script type="text/javascript" src="RawBlockData.js"></script>
+    <script type="text/javascript" src="Block.js"></script>
+
+    <!-- LocalBoard and its dependencies. -->
+    <script type="text/javascript" src="DifficultyCurve.js"></script>
+    <script type="text/javascript" src="DifficultyUI.js"></script>
+    <script type="text/javascript" src="Graphics.js"></script>
+    <script type="text/javascript" src="KeyRepeater.js"></script>
+    <script type="text/javascript" src="Physics.js"></script>
+    <script type="text/javascript" src="Board.js"></script>
+    <script type="text/javascript" src="LocalBoard.js"></script>
+  </head>
+
+  <body onload="initialize()">
+    <div class="spacer"></div>
+    <div class="centered">
+      <div class="game-container">
+        <div class="left-side">
+          <div class="combinos"></div>
+          <div class="spacer"></div>
+          <div class="combinos-options"></div>
+        </div>
+      </div>
+    </div>
+  </body>
+
+  <script>
+    var initialize = (function() {
+    "use strict";
+
+    function initialize() {
+      initialize_move_library();
+      Color.initialize(Color.colorCode);
+      var target = $('.combinos');
+      var board = new LocalBoard(target);
+      var options = new LocalOptions(board, $('.combinos-options'));
+    }
+
+    return initialize;
+    })();
+  </script>
+</html>
