@@ -1,0 +1,29 @@
+[Gameplay image](https://www.skishore.me/wrl-images/gameplay.png) - or [play in a browser](https://www.skishore.me/wrl)
+
+[Debug UI image](https://www.skishore.me/wrl-images/debug.png) - or see an [example debug trace](https://www.skishore.me/wrl/debug.html)
+
+**Overview**
+
+I've been working on WildsRL for a few years, but 2025 was the first year that it's felt like a playable game. The demo above captures the core idea. In WildsRL, the player must travel through the Wilds - a natural(ish) ecosystem populated by strong creatures. Although the game supports combat (via commanding your own tame creatures), this demo does not include it. I wanted to see how hard it is to survive by stealth alone.
+
+The Wilds are a living place where creatures are constantly interacting with each other. Predators hunt prey. Prey will call out to allies to fight back in a group. All creatures eat, drink, and sleep. As an intruder to this ecosystem, the player gets a variety of reactions from these creatures - they may growl, watch the player closely, or run away - but stick around long enough and creatures will inevitably turn hostile.
+
+The main gameplay mechanic is **perception**. Creatures in the Wilds have several senses: sight, sound, and smell. These senses complement each other. Creatures' vision is direction, but they can hear movement behind them. Scent, which builds up over time, is crucial to satisfying gameplay - it defeats the typical "hide in one spot until danger passes" tactic, forcing the player to take risks and get out in the open.
+
+Oh, right - because the game is written in Rust, I am contractually obligated to mention that fact =) But Rust does come with some nice benefits. For instance, I can deploy to the web by compiling to WebAssembly and adding canvas bindings for the terminal output!
+
+**2025 Retrospective**
+
+I spent this year turning two balls of spaghetti code into structured, debuggable systems. It was all engine work, and these refactorings didn't directly change how the game played, but each one enabled a dramatic jump in complexity that I used to turn the demo into more of a real game.
+
+First was the **perception system**. Previously, entities learned about changes in the world through a variety of callbacks sprinkled throughout the game loop. Inevitably, this approach resulted in "information leaks" where entities learned about the position, health, and disposition of other entities which they should not have been able to sense.
+
+I've replaced this code with a Knowledge object that only accepts two kinds of updates. On the entity's turn, we run FOV and provide it a list of visible cells, (possibly) with detailed info about entities on those cells. (Entities can hide in both shadow and in tall grass, so cell visibility doesn't imply entity visibility.) All other updates - sound, scent, and future "remote" senses like those ones - are delivered through an events system. An event is tagged with how much light and sound it generates, so after these changes, we only need to run perception checks in one place.
+
+The other refactoring, which took most of the year, was a multi-step overhaul of NPC AI. At the start of 2025, the AI was a bunch of if-else statements. It also tracked some small state: a cached path, which dramatically sped up ticks if the path's target was still valid. This approach quickly fell apart. I wanted to support a few dozen types of behavior, and to rapidly experiment with new ones. I also repeatedly hit an incredibly frustrating class of bug: I'd tweak some behavior, then play a few rounds of the game, in which I'd encounter some NPC doing something stupid (e.g. running back and forth, or standing still while under attack). When these issues happened, I often had *no clue* what was going on.
+
+My first fix here was to use a [subsumption architecture](https://en.wikipedia.org/wiki/Subsumption_architecture) - essentially, a prioritized list of behaviors, each of which (ideally) only needs to consider its own logic. This approach worked quite well and let me add in several new behaviors - fleeing, hunting by scent, responding to unknown noises. I even added made a minor extension to it in the form of a "categorical utility system" to allow for soft decisions between certain behaviors - e.g. fight-or-flight based on health and allies, instead of having prey always flee.
+
+The main thing that I learned from this step, though, was that it is possible to structure AI code cleanly. I read some of the literature on the subject and [posted here](https://old.reddit.com/r/roguelikedev/comments/1nxwjoa/structuring_ai_code_with_behavior_trees/) for advice, and ended up settling on behavior trees. Specifically, I followed [this design](https://www.chrishecker.com/My_Liner_Notes_for_Spore/Spore_Behavior_Tree_Docs) used in Spore and Halo 2 - statically-defined behavior trees that compile to efficient code, but that are also easy to manipulate and that support detailed runtime introspection.
+
+Behavior trees were a huge win in two ways.
