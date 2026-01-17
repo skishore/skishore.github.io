@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<head>
+  <script type="text/javascript" src="web/pixi/pixi.js"></script>
+  <script type="module" src="web/lib.js"></script>
+  <script type="module" src="web/debug.js"></script>
+
+  <style type="text/css">
+    body {
+      background-color: #888;
+      margin: 0;
+    }
+
+    canvas {
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    canvas.terminal {
+      display: block;
+      margin: 16px;
+      position: relative;
+    }
+
+    div#view {
+      align-items: stretch;
+      background-color: black;
+      display: flex;
+      font: 16px monospace;
+      position: absolute;
+      transform: translate(-50%, -50%) translateY(-16px) scale(0.75);
+      left: 50%;
+      top: 50%;
+    }
+
+    div#view .sidebar {
+      background-color: #ccc;
+      overflow: hidden;
+      position: relative;
+      width: 512px;
+    }
+
+    div#view .sidebar:has(#ai-trace) {
+      width: 768px;
+    }
+
+    div#view #ai-trace {
+      background-color: black;
+      border-left: 1px solid white;
+      inset: 0;
+      overflow-y: scroll;
+      padding: 16px;
+      position: absolute;
+      width: 768;
+    }
+
+    div#view #ai-trace .ai-trace-line {
+      min-height: 1em;
+    }
+
+    div#view #controls {
+      background-color: #ccc;
+      border-top: 1px solid black;
+      inset: 1048px 0 0 0;
+      padding: 16px;
+      position: absolute;
+    }
+
+    div#view #controls input {
+      margin-right: 16px;
+    }
+
+    div#view #controls label {
+      display: block;
+      margin: 24px 12px;
+      user-select: none;
+    }
+
+    div#view #entities {
+      overflow-y: scroll;
+      height: 1032px;
+      padding: 8px 0;
+    }
+
+    div#view #entities > .entity {
+      background-color: white;
+      border: 1px solid black;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 8px 16px;
+      padding: 8px 16px;
+    }
+
+    div#view #entities > .entity.selected {
+      background-color: blue;
+      color: white;
+    }
+
+    div#view #entities > .entity.mouseover {
+      background-color: yellow;
+      color: black;
+    }
+
+    div#view #entities > .entity:hover {
+      background-color: yellow;
+      color: black;
+    }
+
+    div#view #map {
+      position: relative;
+    }
+
+    div#view #map #selection {
+      border: 1px solid yellow;
+      border-radius: 48px;
+      pointer-events: none;
+      position: absolute;
+      width: 48px;
+      height: 48px;
+      z-index: 1;
+    }
+
+    div#view #map #selection.hidden {
+      visibility: hidden;
+    }
+
+    div#timeline-wrapper {
+      position: absolute;
+      inset: auto 48px 8px 48px;
+      height: 44px;
+    }
+
+    div#timeline-wrapper.mouseover {
+      cursor: pointer;
+    }
+
+    div#timeline {
+      background-color: white;
+      pointer-events: none;
+      position: absolute;
+      inset: auto 16px 20px 16px;
+      height: 4px;
+    }
+
+    div#timeline > .tick {
+      border-left: 1px solid black;
+      position: absolute;
+      height: 12px;
+      top: -4px;
+    }
+
+    div#timeline > .tick.mouseover {
+      border-left: 4px solid yellow;
+      height: 40px;
+      top: -18px;
+    }
+
+    div#timeline > .tick.selected {
+      border-left: 4px solid blue;
+      height: 24px;
+      top: -10px;
+    }
+  </style>
+</head>
+<body>
+  <div id="view">
+    <div class="sidebar">
+      <div id="entities"></div>
+      <div id="controls">
+        <div>Controls:</div>
+        <label><input type="checkbox" id="show-all-entities" />Show all entities</label>
+        <label><input type="checkbox" id="show-sightings" />Show sightings</label>
+        <label><input type="checkbox" id="show-utility" />Show utility</label>
+        <label>
+          Click on an entity (either in the list above, or on the map)
+          to see its view of the world.
+        </label>
+        <label>
+          The entity's chosen action and its behavior tree debug
+          are shown on the right.
+        </label>
+        <label>
+          Use J/K to step through the entity's turns.
+        </label>
+        <label>
+          Click on the timeline at the bottom to jump straight to a turn.
+        </label>
+      </div>
+    </div>
+    <div id="map"><div id="selection" class="hidden"></div></div>
+    <div class="sidebar">
+      <div id="ai-trace"></div>
+    </div>
+  </div>
+  <div id="timeline-wrapper">
+    <div id="timeline"></div>
+  </div>
+</body>
