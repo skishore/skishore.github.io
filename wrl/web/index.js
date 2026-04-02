@@ -9,7 +9,7 @@ const main = async () => {
   document.body.appendChild(terminal.app.canvas);
 
   window.wasmCallbacks = {
-    render: (ptr, sx, sy) => {
+    render: ptr => {
       const reader = new Reader(wasm.memory.buffer, ptr);
       for (let y = 0; y < viewY; y++) {
         for (let x = 0; x < viewX; x++) {
@@ -28,6 +28,7 @@ const main = async () => {
     x.stopPropagation();
   }
   terminal.app.ticker.add(() => { tick(); });
+  terminal.app.ticker.maxFPS = 60;
 };
 
 main();

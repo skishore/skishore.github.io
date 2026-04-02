@@ -10,6 +10,9 @@ class DebugTrace {
     const h = this.mapY;
     for (let i = 0; i < 2 * w * h; i++) this.map.push(-1);
 
+    this.dirty = false;
+    this.timelineDirty = false;
+
     this.eid = '';
     this.ticks = [];
     this.tickState = {
@@ -17,6 +20,7 @@ class DebugTrace {
       entities: [],
       map: [],
       sightings: [],
+      neighborhood: new Set(),
       utility: new Map(),
     };
     this.animBatch = [];
@@ -24,6 +28,7 @@ class DebugTrace {
     this.showAll = true;
     this.showSeen = true;
     this.showUtility = true;
+    this.showNeighborhood = false;
 
     this.animIndex = 0;
     this.tickIndex = 0;
@@ -42,6 +47,7 @@ class DebugTrace {
       showAll: document.getElementById('show-all-entities'),
       showSeen: document.getElementById('show-sightings'),
       showUtility: document.getElementById('show-utility'),
+      showNeighborhood: document.getElementById('show-neighborhood'),
       timelineWrapper: document.getElementById('timeline-wrapper'),
       timeline: document.getElementById('timeline'),
       view: document.getElementById('view'),
@@ -59,21 +65,29 @@ class DebugTrace {
 
     this.ui.showUtility.onchange = this.onShowUtilityChange.bind(this);
     this.ui.showUtility.checked = this.showUtility;
+
+    this.ui.showNeighborhood.onchange = this.onShowNeighborhoodChange.bind(this);
+    this.ui.showNeighborhood.checked = this.showNeighborhood;
   }
 
   onShowAllChange() {
     this.showAll = this.ui.showAll.checked;
-    this.markDirty();
+    this.dirty = true;
   }
 
   onShowSeenChange() {
     this.showSeen = this.ui.showSeen.checked;
-    this.markDirty();
+    this.dirty = true;
   }
 
   onShowUtilityChange() {
     this.showUtility = this.ui.showUtility.checked;
-    this.markDirty();
+    this.dirty = true;
+  }
+
+  onShowNeighborhoodChange() {
+    this.showNeighborhood = this.ui.showNeighborhood.checked;
+    this.dirty = true;
   }
 
   onkeydown(keyEvent) {
@@ -105,6 +119,10 @@ class DebugTrace {
       this.ui.showUtility.checked = !this.ui.showUtility.checked;
       this.onShowUtilityChange();
       return;
+    } else if (key === 'n') {
+      this.ui.showNeighborhood.checked = !this.ui.showNeighborhood.checked;
+      this.onShowNeighborhoodChange();
+      return;
     }
 
     const eid = this.eid;
@@ -120,7 +138,8 @@ class DebugTrace {
 
     this.animIndex = this.tickIndex;
     this.tickIndex = options[next][1];
-    this.markDirty();
+    this.timelineDirty = true;
+    this.dirty = true;
   }
 
   onmousedown(mouseEvent) {
@@ -162,7 +181,8 @@ class DebugTrace {
 
     this.animIndex = tickIndex;
     this.tickIndex = tickIndex;
-    this.markDirty();
+    this.timelineDirty = true;
+    this.dirty = true;
   }
 
   getEID(mouseEvent) {
@@ -173,8 +193,8 @@ class DebugTrace {
     if (mouseEvent.target !== this.terminal.app.canvas) return null;
 
     // Non-integral - we use distance-to-center to match to an entity.
-    const x = mouseEvent.layerX / (2 * this.terminal.unitX);
-    const y = mouseEvent.layerY / this.terminal.unitY;
+    const x = mouseEvent.offsetX / (2 * this.terminal.unitX);
+    const y = mouseEvent.offsetY / this.terminal.unitY;
 
     const unit = this.terminal.unitY;
     const cell = this.ui.selection.offsetWidth;
@@ -228,7 +248,8 @@ class DebugTrace {
     this.eid = eid;
     this.tickIndex = next[1];
     this.animIndex = this.tickIndex;
-    this.markDirty();
+    this.timelineDirty = true;
+    this.dirty = true;
   }
 
   async init() {
@@ -263,6 +284,7 @@ class DebugTrace {
       try { this.ticks.push(JSON.parse(line)); } catch { break; }
     }
     this.lastTicks = ticks;
+    this.timelineDirty = true;
     this.dirty = true;
 
     const realTicks = this.ticks.filter(x => x.type === 'tick');
@@ -363,9 +385,21 @@ class DebugTrace {
     }
 
     const {mapX, mapY} = this;
-    const numUtilityEntries = reader.readInt();
+    const neighborhoodSize = reader.readInt();
+    this.tickState.neighborhood.clear();
+    for (let i = 0; i < neighborhoodSize; i++) {
+      const x = reader.readInt();
+      const y = reader.readInt();
+
+      if (!(0 <= x && x < mapX && 0 <= y && y < mapY)) continue;
+      const index = x + y * mapX;
+      this.tickState.neighborhood.add(index);
+      console.log(x, y, index);
+    }
+
+    const utilitySize = reader.readInt();
     this.tickState.utility.clear();
-    for (let i = 0; i < numUtilityEntries; i++) {
+    for (let i = 0; i < utilitySize; i++) {
       const value = reader.readInt();
       const x = reader.readInt();
       const y = reader.readInt();
@@ -414,10 +448,6 @@ class DebugTrace {
     this.drawGlyph(posX, posY, glyph0, glyph1);
   }
 
-  markDirty() {
-    this.dirty = true;
-  }
-
   redraw() {
     if (!this.dirty) return;
     this.dirty = false;
@@ -464,6 +494,15 @@ class DebugTrace {
         let glyph0 = map[index];
         let glyph1 = map[index + 1];
 
+        if (this.showNeighborhood && this.tickState.neighborhood.has(index >> 1)) {
+          const m = 0x20;
+          const r = (glyph1 >> 24) & 0xff;
+          const g = (glyph1 >> 16) & 0xff;
+          const b = (glyph1 >> 8) & 0xff;
+          const color = (Math.max(r, m) << 16) | (Math.max(g, m) << 8) | (Math.max(b, m) << 0);
+          glyph1 = (glyph1 & 0xff) | (color << 8);
+        }
+
         if (this.showUtility) {
           const target = this.tickState.utility.get(index >> 1) ?? 0;
           const blue = (glyph1 >> 8) & 0xff;
@@ -494,6 +533,9 @@ class DebugTrace {
   }
 
   redrawTimeline() {
+    if (!this.timelineDirty) return;
+    this.timelineDirty = false;
+
     if (this.ticks.length === 0) {
       this.ui.timeline.replaceChildren();
       return;

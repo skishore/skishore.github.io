@@ -103,8 +103,8 @@ function __wbg_get_imports() {
     imports.wbg.__wbg_getRandomValues_1c61fac11405ffdc = function() { return handleError(function (arg0, arg1) {
         globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
     }, arguments) };
-    imports.wbg.__wbg_render_afd416ad2ed60de3 = function(arg0, arg1, arg2) {
-        const ret = render(arg0 >>> 0, arg1, arg2);
+    imports.wbg.__wbg_render_2f229bde83550f65 = function(arg0) {
+        const ret = render(arg0 >>> 0);
         return ret;
     };
     imports.wbg.__wbindgen_init_externref_table = function() {
